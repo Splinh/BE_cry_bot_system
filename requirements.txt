@@ -1,0 +1,36 @@
+# ============================================
+#  CRYPTO BOT SYSTEM - Python Dependencies
+# ============================================
+
+# --- Core ---
+python-dotenv>=1.0.0        # Đọc file .env
+pydantic>=2.0.0             # Chuẩn hóa dữ liệu (Models)
+loguru>=0.7.0               # Logging đẹp, dễ debug
+
+# --- Telegram Bot ---
+python-telegram-bot>=21.0   # Thư viện Telegram Bot chính thức
+
+# --- Market Data ---
+ccxt>=4.0.0                 # Giao tiếp API 100+ sàn CEX (Binance, OKX, Bybit)
+websockets>=12.0            # WebSocket client lấy dữ liệu Real-time
+
+# --- News / Sentiment ---
+aiohttp>=3.9.0              # HTTP client bất đồng bộ (gọi API tin tức)
+feedparser>=6.0.0           # Đọc RSS Feed (CoinTelegraph, CoinDesk)
+
+# --- Technical Analysis ---
+pandas>=2.0.0               # Xử lý dữ liệu bảng
+pandas-ta>=0.3.14b1         # Chỉ báo kỹ thuật (RSI, MACD, EMA, Bollinger...)
+numpy>=1.24.0               # Tính toán số học
+
+# --- Web3 / Blockchain (Phase 4+) ---
+# web3>=6.0.0               # Tương tác Blockchain EVM
+# eth-account>=0.9.0        # Quản lý ví Ethereum
+
+# --- Automation (Phase 5+) ---
+# playwright>=1.40.0        # Giả lập trình duyệt (Airdrop social tasks)
+
+# --- Auth ---
+python-jose[cryptography]>=3.3.0  # JWT tokens
+passlib[bcrypt]>=1.7.4             # Password hashing
+bcrypt>=4.0.0                      # BCrypt backend

@@ -1,0 +1,26 @@
+{
+  "whitelist_enabled": true,
+  "whitelist_ids": [
+    8023393059
+  ],
+  "admin_ids": [
+    8023393059
+  ],
+  "pin_enabled": true,
+  "pin_hash": "78f9110cf588bd30afae93e571cd302097208933596793c8d07d9eaff8a2b456",
+  "pin_required_for": [
+    "buy",
+    "send",
+    "claim",
+    "farm",
+    "export_key"
+  ],
+  "tx_limit_enabled": true,
+  "tx_limit_per_tx": 0.1,
+  "tx_limit_daily": 1.0,
+  "rate_limit_enabled": true,
+  "rate_limit_commands": 30,
+  "rate_limit_tx": 10,
+  "auto_lock_minutes": 60,
+  "honeypot_check": true
+}
