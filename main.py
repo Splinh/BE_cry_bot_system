@@ -29,6 +29,7 @@ from airdrop.wallet_manager import WalletManager
 from airdrop.onchain_bot import OnChainBot, NETWORKS
 from airdrop.farming_bot import AirdropFarmer
 from analytics.signal_tracker import SignalTracker
+from analytics.macro_calendar import MacroCalendar
 from analytics.dex_scanner import DexGemScanner
 from analytics.listing_scanner import ListingScanner
 from analytics.cex_airdrop import CexAirdropScanner
@@ -671,10 +672,6 @@ async def _analyze_and_signal(update, token: str, signal_type: str):
                 direction = "MUA"
                 confidence = min(95, 50 + bull * 5)
                 entry = price
-                sl = round(price * 0.95, 2)
-                tp1 = round(price * 1.05, 2)
-                tp2 = round(price * 1.10, 2)
-                tp3 = round(price * 1.20, 2)
             else:
                 # Khong du dieu kien MUA
                 msg = f"\u26aa <b>SPOT: CHUA NEN MUA {token}</b>\n"
@@ -692,18 +689,10 @@ async def _analyze_and_signal(update, token: str, signal_type: str):
                 direction = "LONG"
                 confidence = min(95, 50 + (bull - bear) * 5)
                 entry = price
-                sl = round(price * 0.985, 2)
-                tp1 = round(price * 1.02, 2)
-                tp2 = round(price * 1.04, 2)
-                tp3 = round(price * 1.07, 2)
             elif bear > bull and bear >= 4:
                 direction = "SHORT"
                 confidence = min(95, 50 + (bear - bull) * 5)
                 entry = price
-                sl = round(price * 1.015, 2)
-                tp1 = round(price * 0.98, 2)
-                tp2 = round(price * 0.96, 2)
-                tp3 = round(price * 0.93, 2)
             else:
                 msg = f"\u26aa <b>FUTURES: CHUA CO TIN HIEU {token}</b>\n"
                 msg += "\u2501" * 18 + "\n"
@@ -713,6 +702,114 @@ async def _analyze_and_signal(update, token: str, signal_type: str):
                 msg += "\u2501" * 18
                 await update.message.reply_text(msg, parse_mode="HTML")
                 return
+
+        # === 1. MACRO EVENT RISK FILTER ===
+        from analytics.macro_calendar import MacroCalendar
+        macro = MacroCalendar()
+        macro_risk = "NORMAL"
+        macro_risk_data = {}
+        try:
+            macro_risk_data = await macro.assess_risk()
+            macro_risk = macro_risk_data.get("risk_level", "NORMAL")
+        except Exception as e:
+            logger.warning(f"Macro check failed: {e}")
+        finally:
+            await macro.close()
+
+        is_blocked_by_macro = False
+        blocked_reason = ""
+        if macro_risk == "CRITICAL" and macro_risk_data.get("warnings"):
+            for w in macro_risk_data["warnings"]:
+                ev = w.get("event", {})
+                hours = ev.get("hours_until", 999)
+                if 0 <= hours <= 4:
+                    is_blocked_by_macro = True
+                    blocked_reason = f"Su kien cuc ky quan trong ({ev.get('title')}) sap dien ra trong {hours:.1f} gio."
+                    break
+
+        if is_blocked_by_macro:
+            msg = f"\u26a0\ufe0f <b>GIAO DICH BI CHAN: RUI RO VI MO LON</b>\n"
+            msg += "\u2501" * 18 + "\n"
+            msg += f"\U0001fa99 <b>Coin:</b> {token}/USDT\n"
+            msg += f"\u26a0\ufe0f <b>Ly do:</b> {blocked_reason}\n"
+            msg += "Hay kien nhan doi su kien ket thuc de dam bao an toan von."
+            await update.message.reply_text(msg, parse_mode="HTML")
+            return
+
+        # === 2. NEWS SENTIMENT FILTER ===
+        sentiment_analyzer = SentimentAnalyzer()
+        crawler = NewsCrawler()
+        news_sentiment = 0
+        market_mood_lbl = "TRUNG LAP"
+        try:
+            news = await crawler.fetch_by_coin(token, limit=8)
+            if not news:
+                news = await crawler.fetch_cryptopanic("hot", limit=5)
+            analyzed_news = sentiment_analyzer.analyze_news_batch(news) if news else []
+            market_mood = sentiment_analyzer.get_market_mood(analyzed_news)
+            news_sentiment = market_mood.get("avg_score", 0)
+            market_mood_lbl = market_mood.get("mood", "NEUTRAL")
+        except Exception as e:
+            logger.warning(f"Sentiment check failed: {e}")
+        finally:
+            await crawler.close()
+
+        if direction in ("LONG", "MUA") and market_mood_lbl == "BEARISH":
+            msg = f"\u26a0\ufe0f <b>BO QUA TIN HIEU LONG: XUNG DOT TIN TUC</b>\n"
+            msg += "\u2501" * 18 + "\n"
+            msg += f"\U0001fa99 <b>Coin:</b> {token}/USDT\n"
+            msg += f"\u26a0\ufe0f <b>Ly do:</b> Tin hieu ky thuat LONG nhung tin tuc dang tieu cuc (BEARISH).\n"
+            msg += f"Diem tin tuc: {news_sentiment:+.1f}\n"
+            await update.message.reply_text(msg, parse_mode="HTML")
+            return
+
+        if direction == "SHORT" and market_mood_lbl == "BULLISH":
+            msg = f"\u26a0\ufe0f <b>BO QUA TIN HIEU SHORT: XUNG DOT TIN TUC</b>\n"
+            msg += "\u2501" * 18 + "\n"
+            msg += f"\U0001fa99 <b>Coin:</b> {token}/USDT\n"
+            msg += f"\u26a0\ufe0f <b>Ly do:</b> Tin hieu ky thuat SHORT nhung tin tuc dang tich cuc (BULLISH).\n"
+            msg += f"Diem tin tuc: {news_sentiment:+.1f}\n"
+            await update.message.reply_text(msg, parse_mode="HTML")
+            return
+
+        # === 3. SMART SL/TP LEVELS (ATR + S/R + Fibonacci) ===
+        smart_levels = None
+        leverage = 10 if signal_type == "FUTURES" else 1
+        try:
+            df = await analyzer.get_ohlcv(symbol, "1h", limit=100)
+            if not df.empty and len(df) >= 20:
+                df = analyzer.calculate_indicators(df)
+                smart_levels = analyzer.compute_smart_levels(
+                    df, direction="LONG" if direction in ("LONG", "MUA") else "SHORT",
+                    leverage=leverage, macro_risk=macro_risk
+                )
+        except Exception as e:
+            logger.warning(f"Smart levels calculation failed: {e}")
+
+        if smart_levels and not smart_levels.get("error"):
+            sl = smart_levels["sl"]
+            tp1 = smart_levels["tp1"]
+            tp2 = smart_levels["tp2"]
+            tp3 = smart_levels["tp3"]
+            sl_method = smart_levels.get("sl_method_detail", smart_levels.get("method", "ATR+S/R"))
+        else:
+            sl_method = "Fixed % (Fallback)"
+            if signal_type == "SPOT":
+                sl = round(price * 0.95, 2)
+                tp1 = round(price * 1.05, 2)
+                tp2 = round(price * 1.10, 2)
+                tp3 = round(price * 1.20, 2)
+            else:
+                if direction == "LONG":
+                    sl = round(price * 0.985, 2)
+                    tp1 = round(price * 1.02, 2)
+                    tp2 = round(price * 1.04, 2)
+                    tp3 = round(price * 1.07, 2)
+                else:
+                    sl = round(price * 1.015, 2)
+                    tp1 = round(price * 0.98, 2)
+                    tp2 = round(price * 0.96, 2)
+                    tp3 = round(price * 0.93, 2)
 
         # Tinh R:R
         rr = abs(tp2 - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
@@ -744,14 +841,15 @@ async def _analyze_and_signal(update, token: str, signal_type: str):
         msg += "\u2501" * 18 + "\n"
         msg += f"\U0001fa99 <b>Coin:</b> {token}/USDT\n"
         msg += f"\U0001f4cd <b>Entry:</b> ${entry:,.2f}\n"
-        msg += f"\U0001f6d1 <b>Stop Loss:</b> ${sl:,.2f}\n"
+        msg += f"\U0001f6d1 <b>Stop Loss:</b> ${sl:,.2f} ({sl_method})\n"
         msg += f"\U0001f3af <b>TP1:</b> ${tp1:,.2f}\n"
         msg += f"\U0001f3af <b>TP2:</b> ${tp2:,.2f}\n"
         msg += f"\U0001f3af <b>TP3:</b> ${tp3:,.2f}\n"
         msg += f"\U0001f4ca <b>R:R Ratio:</b> 1:{rr:.1f}\n"
         msg += f"\U0001f4ca <b>Do tin cay:</b> {confidence}%\n"
+        msg += f"\U0001f4f0 <b>Tam ly news:</b> {market_mood_lbl} ({news_sentiment:+.1f})\n"
         if signal_type == "FUTURES":
-            msg += f"\u26a0\ufe0f <b>Leverage:</b> 5-10x\n"
+            msg += f"\u26a0\ufe0f <b>Leverage:</b> {leverage}x\n"
         msg += "\u2501" * 18 + "\n\n"
         msg += "\U0001f50d <b>CHI BAO:</b>\n"
         msg += "\n".join(reasons) + "\n\n"
@@ -773,6 +871,7 @@ async def _analyze_and_signal(update, token: str, signal_type: str):
             "tp2": tp2,
             "tp3": tp3,
             "chat_id": chat_id,
+            "leverage": leverage,
         })
 
         await update.message.reply_text(

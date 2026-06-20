@@ -9,6 +9,7 @@ import aiohttp
 from datetime import datetime, timedelta
 from typing import Optional
 from loguru import logger
+from aiohttp.resolver import ThreadedResolver
 
 from notifiers.telegram_bot import TelegramNotifier
 from core.config import Config
@@ -62,7 +63,9 @@ class ListingScanner:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if not self.session or self.session.closed:
+            connector = aiohttp.TCPConnector(resolver=ThreadedResolver())
             self.session = aiohttp.ClientSession(
+                connector=connector,
                 timeout=aiohttp.ClientTimeout(total=20),
                 headers={"User-Agent": "CryptoBotSystem/1.0"},
             )

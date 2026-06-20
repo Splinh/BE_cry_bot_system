@@ -31,6 +31,18 @@ class Config:
     # --- App Settings ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
+    # --- Risk Management (hard caps tuyet doi, ap dung ca paper lan live) ---
+    # Don vi: PCT la ty le tren balance; USD la gioi han tuyet doi. Cap nao chat hon thi thang.
+    RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.02"))        # rui ro/lenh = 2% balance
+    MAX_LEVERAGE: int = int(os.getenv("MAX_LEVERAGE", "10"))                  # hard cap leverage
+    MAX_MARGIN_PER_TRADE_PCT: float = float(os.getenv("MAX_MARGIN_PER_TRADE_PCT", "0.10"))  # margin/lenh <= 10% balance
+    MAX_MARGIN_PER_TRADE_USD: float = float(os.getenv("MAX_MARGIN_PER_TRADE_USD", "2000"))  # margin/lenh <= $2000
+    MAX_TOTAL_MARGIN_PCT: float = float(os.getenv("MAX_TOTAL_MARGIN_PCT", "0.50"))          # tong margin mo <= 50% balance
+    MAX_TOTAL_MARGIN_USD: float = float(os.getenv("MAX_TOTAL_MARGIN_USD", "8000"))          # tong margin mo <= $8000
+    MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "8"))       # so lenh mo dong thoi toi da
+    MAX_DAILY_LOSS_USD: float = float(os.getenv("MAX_DAILY_LOSS_USD", "1000"))  # lo toi da/ngay -> khoa mo lenh
+    MAX_DAILY_LOSS_PCT: float = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.10"))  # hoac 10% balance dau ngay
+
     @classmethod
     def validate(cls):
         """Kiểm tra các biến bắt buộc đã được điền chưa."""

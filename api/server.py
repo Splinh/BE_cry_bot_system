@@ -129,26 +129,33 @@ def _get_latest_prices() -> dict:
         return _price_cache["prices"]
     
     # Fallback: Binance REST API
-    try:
-        resp = httpx.get("https://api.binance.com/api/v3/ticker/24hr",
-                         params={"symbols": '["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT","DOTUSDT","MATICUSDT"]'},
-                         timeout=5)
-        if resp.status_code == 200:
-            result = {}
-            for t in resp.json():
-                result[t["symbol"]] = {
-                    "price": float(t.get("lastPrice", 0)),
-                    "change_pct": float(t.get("priceChangePercent", 0)),
-                    "high": float(t.get("highPrice", 0)),
-                    "low": float(t.get("lowPrice", 0)),
-                    "volume": float(t.get("volume", 0)),
-                    "open": float(t.get("openPrice", 0)),
-                }
-            _price_cache["prices"] = result
-            _price_cache["ts"] = now
-            return result
-    except Exception as e:
-        logger.warning(f"Binance REST price fetch error: {e}")
+    endpoints = [
+        "https://api.binance.com/api/v3/ticker/24hr",
+        "https://api1.binance.com/api/v3/ticker/24hr",
+        "https://api2.binance.com/api/v3/ticker/24hr",
+        "https://api3.binance.com/api/v3/ticker/24hr",
+    ]
+    for url in endpoints:
+        try:
+            resp = httpx.get(url,
+                             params={"symbols": '["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT","DOTUSDT","MATICUSDT"]'},
+                             timeout=5)
+            if resp.status_code == 200:
+                result = {}
+                for t in resp.json():
+                    result[t["symbol"]] = {
+                        "price": float(t.get("lastPrice", 0)),
+                        "change_pct": float(t.get("priceChangePercent", 0)),
+                        "high": float(t.get("highPrice", 0)),
+                        "low": float(t.get("lowPrice", 0)),
+                        "volume": float(t.get("volume", 0)),
+                        "open": float(t.get("openPrice", 0)),
+                    }
+                _price_cache["prices"] = result
+                _price_cache["ts"] = now
+                return result
+        except Exception as e:
+            logger.warning(f"Binance REST price fetch error for {url}: {e}")
     
     return _price_cache["prices"]
 
@@ -226,10 +233,12 @@ def get_trading():
     # Fetch DexScreener prices for GEM positions
     gem_prices = _fetch_gem_prices(te)
     
-    # Tinh live PnL cho tung position
+    # Tinh live PnL cho tung position (chi hien OPEN/PARTIAL, bo CLOSED)
     positions = []
     total_unrealized = 0.0
     for k, p in te.positions.items():
+        if p.get("status") == "CLOSED":
+            continue  # Da dong, bo qua (se bi cleanup sau 30s)
         pos = dict(**p, id=k, _key=k)
         coin = p.get("coin", "")
         pos_type = p.get("type", "FUTURES")
@@ -316,13 +325,15 @@ async def open_manual_trade(req: ManualTradeReq):
     
     # Fallback: lay truc tiep tu Binance cho token ko co trong cache
     if current_price <= 0:
-        try:
-            resp = httpx.get(f"https://api.binance.com/api/v3/ticker/price",
-                            params={"symbol": symbol}, timeout=5)
-            if resp.status_code == 200:
-                current_price = float(resp.json().get("price", 0))
-        except Exception:
-            pass
+        for host in ["api.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com"]:
+            try:
+                resp = httpx.get(f"https://{host}/api/v3/ticker/price",
+                                params={"symbol": symbol}, timeout=5)
+                if resp.status_code == 200:
+                    current_price = float(resp.json().get("price", 0))
+                    break
+            except Exception:
+                pass
     
     if current_price <= 0:
         raise HTTPException(400, f"Khong lay duoc gia {req.coin}")
@@ -386,24 +397,22 @@ async def open_manual_trade(req: ManualTradeReq):
         leverage=req.leverage,
         current_price=current_price,
         smart_levels=smart_levels,
+        wallet_id=req.wallet_id,
+        wallet_label=req.wallet_label or "",
     )
     
     if not pos:
-        raise HTTPException(400, "Khong the mo lenh. Kiem tra so du hoac da co lenh cung coin.")
-    
-    # Gan wallet info vao position
-    if req.wallet_id:
-        pos["wallet_id"] = req.wallet_id
-        pos["wallet_label"] = req.wallet_label or f"Wallet #{req.wallet_id}"
-        te._save_data()
+        raise HTTPException(400, "Khong the mo lenh. Kiem tra so du.")
     
     # Them smart levels info cho frontend
     if smart_levels:
         pos["sl_method"] = smart_levels.get("method", "")
         pos["atr"] = smart_levels.get("atr", 0)
         pos["macro_risk"] = smart_levels.get("macro_risk", "NORMAL")
+        te._save_data()
     
-    return {"success": True, "position": pos}
+    is_dca = pos.get("dca_count", 0) > 0
+    return {"success": True, "position": pos, "is_dca": is_dca}
 
 @app.post("/api/trading/close/{sig_key}")
 def close_position_web(sig_key: str):
@@ -421,13 +430,15 @@ def close_position_web(sig_key: str):
     
     # Fallback: lay truc tiep tu Binance
     if current_price <= 0:
-        try:
-            resp = httpx.get(f"https://api.binance.com/api/v3/ticker/price",
-                            params={"symbol": symbol}, timeout=5)
-            if resp.status_code == 200:
-                current_price = float(resp.json().get("price", 0))
-        except Exception:
-            pass
+        for host in ["api.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com"]:
+            try:
+                resp = httpx.get(f"https://{host}/api/v3/ticker/price",
+                                params={"symbol": symbol}, timeout=5)
+                if resp.status_code == 200:
+                    current_price = float(resp.json().get("price", 0))
+                    break
+            except Exception:
+                pass
     
     if current_price <= 0:
         raise HTTPException(400, "Khong lay duoc gia hien tai")
@@ -488,16 +499,20 @@ async def start_sl_tp_monitor():
         while True:
             try:
                 te = ctx.get("trade_engine")
-                if te and len(te.positions) > 0:
-                    prices = _get_latest_prices()
-                    if prices:
-                        closed = te.check_sl_tp(prices)
-                        for c in closed:
-                            logger.warning(
-                                f"AUTO SL/TP: {c['reason']} | Key: {c['key']} | "
-                                f"Price: ${c['price']:,.2f} | PnL: ${c['pnl']:.2f}"
-                            )
-                            _sl_tp_events.append(c)
+                if te:
+                    # Cleanup positions da dong qua 30s
+                    te._cleanup_closed()
+                    
+                    if len([p for p in te.positions.values() if p.get("status") != "CLOSED"]) > 0:
+                        prices = _get_latest_prices()
+                        if prices:
+                            closed = te.check_sl_tp(prices)
+                            for c in closed:
+                                logger.warning(
+                                    f"AUTO SL/TP: {c['reason']} | Key: {c['key']} | "
+                                    f"Price: ${c['price']:,.2f} | PnL: ${c['pnl']:.2f}"
+                                )
+                                _sl_tp_events.append(c)
             except Exception as e:
                 logger.error(f"SL/TP monitor error: {e}")
             await asyncio.sleep(3)
@@ -772,6 +787,14 @@ async def leverage_analyze(coin: str, leverage: int = 10, market_type: str = "fu
             },
         })
         
+        # === LIMIT ENTRY SIGNALS ===
+        try:
+            limit_entries = ta_engine.compute_limit_entries(df, leverage=leverage)
+            base_signal["limit_entries"] = limit_entries
+        except Exception as e:
+            logger.warning(f"Limit entry computation failed: {e}")
+            base_signal["limit_entries"] = []
+        
         return base_signal
     finally:
         await ta_engine.close()
@@ -890,6 +913,52 @@ def get_audit():
         return {"logs": logs[-30:]}
     except:
         return {"logs": []}
+
+# ============================================
+#  MACRO CALENDAR & ECONOMIC EVENTS
+# ============================================
+
+@app.get("/api/macro/calendar")
+async def get_macro_calendar(days: int = 30):
+    """Lay toan bo su kien kinh te sap toi (FOMC, CPI, NFP, GDP...)."""
+    from analytics.macro_calendar import MacroCalendar
+    macro = MacroCalendar()
+    try:
+        events = await macro.get_all_events(days_ahead=min(days, 90))
+        return {"events": events, "count": len(events)}
+    except Exception as e:
+        logger.error(f"Macro calendar error: {e}")
+        return {"events": [], "error": str(e)}
+    finally:
+        await macro.close()
+
+@app.get("/api/macro/next")
+async def get_macro_next():
+    """Lay su kien CRITICAL/HIGH gan nhat sap dien ra."""
+    from analytics.macro_calendar import MacroCalendar
+    macro = MacroCalendar()
+    try:
+        event = await macro.get_next_critical()
+        return {"event": event}
+    except Exception as e:
+        logger.error(f"Macro next error: {e}")
+        return {"event": None, "error": str(e)}
+    finally:
+        await macro.close()
+
+@app.get("/api/macro/risk")
+async def get_macro_risk():
+    """Danh gia muc do rui ro hien tai dua tren events sap toi."""
+    from analytics.macro_calendar import MacroCalendar
+    macro = MacroCalendar()
+    try:
+        risk = await macro.assess_risk()
+        return risk
+    except Exception as e:
+        logger.error(f"Macro risk error: {e}")
+        return {"risk_level": "NORMAL", "warnings": [], "error": str(e)}
+    finally:
+        await macro.close()
 
 # ============================================
 #  DEX GEM SCANNER (Tim Keo)

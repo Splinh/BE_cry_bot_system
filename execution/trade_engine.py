@@ -33,9 +33,22 @@ class TradeEngine:
         self.balance_history: list = []  # Lich su nap/rut
         self.auto_trade_enabled: bool = False
         self.last_sync: str = ""
-        
-        # Risk management: risk 2% tai khoan cho moi lenh (neu cham SL)
-        self.risk_per_trade: float = 0.02
+
+        # === Risk management: hard caps tu Config (don vi PCT theo balance + USD tuyet doi) ===
+        self.risk_per_trade: float = Config.RISK_PER_TRADE
+        self.max_leverage: int = Config.MAX_LEVERAGE
+        self.max_margin_per_trade_pct: float = Config.MAX_MARGIN_PER_TRADE_PCT
+        self.max_margin_per_trade_usd: float = Config.MAX_MARGIN_PER_TRADE_USD
+        self.max_total_margin_pct: float = Config.MAX_TOTAL_MARGIN_PCT
+        self.max_total_margin_usd: float = Config.MAX_TOTAL_MARGIN_USD
+        self.max_open_positions: int = Config.MAX_OPEN_POSITIONS
+        self.max_daily_loss_usd: float = Config.MAX_DAILY_LOSS_USD
+        self.max_daily_loss_pct: float = Config.MAX_DAILY_LOSS_PCT
+
+        # Theo doi lo/lai trong ngay de kich hoat khoa giao dich (circuit breaker)
+        self.daily_date: str = ""          # YYYY-MM-DD cua phien hien tai
+        self.daily_realized_pnl: float = 0.0
+        self.daily_start_balance: float = 0.0
 
         self._load_data()
 
@@ -50,6 +63,9 @@ class TradeEngine:
                     self.history = data.get("history", [])
                     self.balance_history = data.get("balance_history", [])
                     self.auto_trade_enabled = data.get("auto_trade", False)
+                    self.daily_date = data.get("daily_date", "")
+                    self.daily_realized_pnl = data.get("daily_realized_pnl", 0.0)
+                    self.daily_start_balance = data.get("daily_start_balance", 0.0)
             except Exception as e:
                 logger.error(f"Loi doc file paper trading: {e}")
         else:
@@ -66,6 +82,9 @@ class TradeEngine:
                     "history": self.history[-100:],
                     "balance_history": self.balance_history[-50:],
                     "auto_trade": self.auto_trade_enabled,
+                    "daily_date": self.daily_date,
+                    "daily_realized_pnl": self.daily_realized_pnl,
+                    "daily_start_balance": self.daily_start_balance,
                     "last_sync": datetime.now().isoformat()
                 }, f, indent=4)
         except Exception as e:
@@ -85,6 +104,120 @@ class TradeEngine:
         self.auto_trade_enabled = enable
         self._save_data()
         return self.auto_trade_enabled
+
+    # ==========================================
+    #  RISK GUARDS (hard caps tuyet doi)
+    # ==========================================
+
+    def _today(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _roll_daily(self):
+        """Reset bo dem lo/lai khi sang ngay moi (tinh theo gio local)."""
+        today = self._today()
+        if self.daily_date != today:
+            self.daily_date = today
+            self.daily_realized_pnl = 0.0
+            self.daily_start_balance = self.balance
+            self._save_data()
+
+    def _record_realized_pnl(self, pnl: float):
+        """Cong don PnL da chot vao bo dem ngay (goi tu partial_close/close_position)."""
+        self._roll_daily()
+        self.daily_realized_pnl += pnl
+
+    def current_total_margin(self) -> float:
+        """Tong margin dang bi khoa boi cac lenh mo (phan chua chot)."""
+        total = 0.0
+        for pos in self.positions.values():
+            if pos.get("status") == "CLOSED":
+                continue
+            rem_pct = 1.0 - pos.get("closed_pct", 0.0)
+            total += pos.get("margin", 0.0) * max(rem_pct, 0.0)
+        return total
+
+    def daily_loss_limit_usd(self) -> float:
+        """Nguong lo/ngay tuyet doi = min(cap USD, cap % balance dau ngay)."""
+        base = self.daily_start_balance or self.balance
+        pct_cap = base * self.max_daily_loss_pct
+        return min(self.max_daily_loss_usd, pct_cap)
+
+    def is_trading_locked(self) -> bool:
+        """True neu da cham nguong lo/ngay -> khoa mo lenh moi (circuit breaker)."""
+        self._roll_daily()
+        return self.daily_realized_pnl <= -self.daily_loss_limit_usd()
+
+    def can_open_position(self, margin_required: float) -> tuple:
+        """
+        Kiem tra tat ca hard cap truoc khi mo lenh.
+        Return (ok: bool, reason: str). reason rong neu ok.
+        """
+        self._roll_daily()
+
+        if self.is_trading_locked():
+            return False, (f"Da cham gioi han lo/ngay "
+                           f"(${self.daily_realized_pnl:.2f} / -${self.daily_loss_limit_usd():.2f}). Khoa den ngay mai.")
+
+        open_count = sum(1 for p in self.positions.values() if p.get("status") != "CLOSED")
+        if open_count >= self.max_open_positions:
+            return False, f"Da dat so lenh mo toi da ({self.max_open_positions})."
+
+        margin_cap = min(self.max_margin_per_trade_usd, self.balance * self.max_margin_per_trade_pct)
+        if margin_required > margin_cap + 1e-9:
+            return False, f"Margin/lenh ${margin_required:.2f} vuot cap ${margin_cap:.2f}."
+
+        total_cap = min(self.max_total_margin_usd, self.balance * self.max_total_margin_pct)
+        if self.current_total_margin() + margin_required > total_cap + 1e-9:
+            return False, (f"Tong margin ${self.current_total_margin() + margin_required:.2f} "
+                           f"vuot cap ${total_cap:.2f}.")
+
+        if margin_required > self.balance:
+            return False, f"Khong du so du (can ${margin_required:.2f}, co ${self.balance:.2f})."
+
+        return True, ""
+
+    # ==========================================
+    #  DCA (gop lenh cung coin trong cung vi)
+    # ==========================================
+
+    def find_open_position_by_coin(self, coin: str) -> Optional[tuple]:
+        """Tra ve (key, pos) cua lenh dang mo cho coin, hoac None."""
+        coin = coin.upper()
+        for k, p in self.positions.items():
+            if p.get("status") != "CLOSED" and p.get("coin", "").upper() == coin:
+                return k, p
+        return None
+
+    def _apply_dca(self, pos: dict, add_size: float, add_entry: float) -> Optional[float]:
+        """
+        Gop them khoi luong vao vi the cung chieu (DCA nhu cac san):
+        - Binh quan gia vao (weighted theo usdt_size)
+        - Cong don size + margin, tru margin moi khoi balance
+        - GIU NGUYEN SL/TP & tien do chot (closed_pct) cua lenh goc
+        Tra ve margin da tru, hoac None neu khong du so du.
+        """
+        leverage = pos.get("leverage", 1) or 1
+        add_margin = add_size / leverage
+        if add_margin > self.balance:
+            return None
+
+        old_size = pos.get("usdt_size", 0.0)
+        new_total = old_size + add_size
+        if new_total <= 0:
+            return None
+
+        avg_entry = (old_size * pos.get("entry_price", add_entry) + add_size * add_entry) / new_total
+        pos["entry_price"] = avg_entry
+        pos["usdt_size"] = new_total
+        pos["margin"] = round(pos.get("margin", 0.0) + add_margin, 2)
+        pos["dca_count"] = pos.get("dca_count", 0) + 1
+        pos["last_dca_time"] = datetime.now().isoformat()
+        if pos.get("status") == "CLOSED":
+            pos["status"] = "OPEN"
+
+        self.balance -= add_margin
+        self._save_data()
+        return add_margin
 
     # ==========================================
     #  NAP / RUT TIEN (Paper Trading)
@@ -261,9 +394,9 @@ class TradeEngine:
             logger.info(f"TRAILING SL [{sig_key}]: {sl:.4f} -> {new_sl:.4f}")
             self._save_data()
 
-    def calculate_position_size(self, entry_price: float, stop_loss: float) -> float:
+    def calculate_position_size(self, entry_price: float, stop_loss: float, leverage: int = 1) -> float:
         """
-        Tinh toan khoi luong Giao dich (USDT Size) dua theo rui ro.
+        Tinh toan khoi luong Giao dich (USDT Size) dua theo rui ro va leverage.
         Cong thuc: Risk_Amount = Balance * Risk%
                    SL_Percent = abs(Entry - SL) / Entry
                    Position_Size = Risk_Amount / SL_Percent
@@ -280,17 +413,27 @@ class TradeEngine:
 
         pos_size = risk_amount / sl_pct
         
-        # Bao ve an toan: Max size = 20% tai khoan tren 1 lenh (Danh cho Margin)
-        max_size = self.balance * 0.2
-        return min(pos_size, max_size)
+        # Gioi han margin su dung tren 1 lenh la 20% tai khoan (tranh qua muc)
+        # Margin = pos_size / leverage -> pos_size = Margin * leverage
+        max_margin = self.balance * 0.2
+        max_size = max_margin * leverage
+        
+        # Dam bao margin luon be hon so du kha dung
+        max_possible_size = (self.balance * 0.95) * leverage
+        
+        calculated_size = min(pos_size, max_size)
+        return min(calculated_size, max_possible_size)
 
     def open_manual_position(self, coin: str, direction: str, usdt_size: float,
                               leverage: int = 1, current_price: float = 0,
-                              smart_levels: Optional[dict] = None) -> Optional[dict]:
+                              smart_levels: Optional[dict] = None,
+                              wallet_id: Optional[int] = None,
+                              wallet_label: str = "") -> Optional[dict]:
         """
         Mo lenh thu cong tu Web Dashboard.
-        User tu chon volume (USDT size) va leverage.
-        SL/TP tu dong tinh: uu tien smart_levels (ATR+S/R) > fallback % co dinh.
+        - Cung coin + cung direction + cung wallet -> DCA (gop lenh, binh quan gia)
+        - Cung coin + cung direction + khac wallet -> Mo lenh rieng
+        - Cung coin + khac direction -> Mo lenh rieng (hedge)
         """
         if usdt_size <= 0 or current_price <= 0:
             return None
@@ -301,13 +444,54 @@ class TradeEngine:
             logger.warning(f"Manual trade: Khong du so du. Can ${margin_required:.2f}, co ${self.balance:.2f}")
             return None
         
-        # Kiem tra da co vi the cung coin chua
+        # Tim lenh da mo: cung coin + cung direction + cung wallet
+        existing_key = None
         for pos_key, pos_data in self.positions.items():
-            if pos_data["coin"] == coin.upper():
-                logger.warning(f"Manual trade: Da co lenh mo voi {coin}")
-                return None
+            if (pos_data["coin"] == coin.upper() 
+                and pos_data.get("direction") == direction.upper()
+                and pos_data.get("status") != "CLOSED"
+                and pos_data.get("wallet_id") == wallet_id):
+                existing_key = pos_key
+                break
+        
+        # === DCA: Gop vao lenh cu (cung coin + direction + wallet) ===
+        if existing_key:
+            pos = self.positions[existing_key]
+            old_size = pos.get("usdt_size", 0)
+            old_entry = pos.get("entry_price", current_price)
+            new_total_size = old_size + usdt_size
+            
+            # Binh quan gia vao (weighted average)
+            avg_entry = (old_size * old_entry + usdt_size * current_price) / new_total_size
+            
+            # Cap nhat position
+            pos["entry_price"] = avg_entry
+            pos["usdt_size"] = new_total_size
+            pos["margin"] = round(pos.get("margin", 0) + margin_required, 2)
+            pos["dca_count"] = pos.get("dca_count", 0) + 1
+            pos["last_dca_time"] = datetime.now().isoformat()
+            pos["last_dca_price"] = current_price
+            
+            # Re-calculate SL/TP dua tren gia binh quan moi
+            if smart_levels and not smart_levels.get("error"):
+                pos["sl"] = round(smart_levels["sl"], 4)
+                pos["tp1"] = round(smart_levels["tp1"], 4)
+                pos["tp2"] = round(smart_levels["tp2"], 4)
+                pos["tp3"] = round(smart_levels["tp3"], 4)
+            
+            self.balance -= margin_required
+            self._save_data()
+            
+            logger.success(
+                f"DCA #{pos['dca_count']}: {direction} {coin} x{leverage} | "
+                f"+${usdt_size:.2f} -> Total: ${new_total_size:.2f} | "
+                f"Avg Entry: ${avg_entry:,.2f} (was ${old_entry:,.2f}) | "
+                f"Wallet: {wallet_label or 'Default'}"
+            )
+            return pos
 
-        # === SMART SL/TP (ATR + S/R + Fibonacci) ===
+        # === Mo lenh moi ===
+        # Smart SL/TP
         if smart_levels and not smart_levels.get("error"):
             sl = smart_levels["sl"]
             tp1 = smart_levels["tp1"]
@@ -316,7 +500,7 @@ class TradeEngine:
             sl_method = smart_levels.get("method", "ATR+S/R+Fib")
             logger.info(f"Smart SL/TP: {sl_method} | ATR={smart_levels.get('atr', 0):.4f}")
         else:
-            # === FALLBACK: % CO DINH THEO LEVERAGE ===
+            # Fallback: % co dinh theo leverage
             sl_method = "Fixed %"
             if leverage >= 50:
                 sl_pct = 0.005
@@ -345,7 +529,7 @@ class TradeEngine:
                 tp2 = current_price * (1 - tp_pcts[1])
                 tp3 = current_price * (1 - tp_pcts[2])
 
-        sig_key = f"MANUAL_{coin.upper()}_{direction}_{datetime.now().strftime('%H%M%S')}"
+        sig_key = f"MANUAL_{coin.upper()}_{direction}_{datetime.now().strftime('%H%M%S%f')}"
 
         pos = {
             "key": sig_key,
@@ -367,6 +551,9 @@ class TradeEngine:
             "status": "OPEN",
             "closed_pct": 0.0,
             "manual": True,
+            "wallet_id": wallet_id,
+            "wallet_label": wallet_label or "",
+            "dca_count": 0,
         }
 
         self.positions[sig_key] = pos
@@ -378,7 +565,7 @@ class TradeEngine:
             f"MANUAL TRADE: {direction} {coin} x{leverage} | "
             f"Size: ${usdt_size:.2f} | Margin: ${margin_required:.2f} | "
             f"Entry: ${current_price:,.2f} | SL: ${sl:,.2f} | "
-            f"Liq: ~${liq_price:,.2f}"
+            f"Liq: ~${liq_price:,.2f} | Wallet: {wallet_label or 'Default'}"
         )
         return pos
 
@@ -407,7 +594,8 @@ class TradeEngine:
             return None
 
         # Tinh toan khoi luong
-        usdt_size = self.calculate_position_size(entry, sl)
+        leverage = signal.get("leverage", 1)
+        usdt_size = self.calculate_position_size(entry, sl, leverage)
         if usdt_size <= 10:  # Size < 10$ ko dang vao
             logger.warning(f"Paper trade: Size qua xiu (${usdt_size:.2f}) -> Bo qua")
             return None
@@ -419,6 +607,7 @@ class TradeEngine:
         tp3 = signal.get("tp3", entry * 1.09 if direction == "LONG" else entry * 0.91)
 
         # Mo lenh
+        margin_required = usdt_size / leverage
         pos = {
             "key": sig_key,
             "coin": signal.get("coin", ""),
@@ -430,7 +619,8 @@ class TradeEngine:
             "tp2": tp2,
             "tp3": tp3,
             "usdt_size": usdt_size,
-            "leverage": signal.get("leverage", 1),
+            "leverage": leverage,
+            "margin": round(margin_required, 2),
             "open_time": datetime.now().isoformat(),
             "close_time": None,
             "close_price": 0.0,
@@ -442,8 +632,7 @@ class TradeEngine:
         self.positions[sig_key] = pos
         
         # Tru so du (Gia lap ky quy - Margin)
-        # Giua Spot va Futures deu tru thang Size cho de hieu
-        self.balance -= usdt_size
+        self.balance -= margin_required
         self._save_data()
 
         logger.success(f"PAPER TRADE MO LENH: {direction} {pos['coin']} | Size: ${usdt_size:.2f} | Entry: {entry}")
@@ -473,11 +662,13 @@ class TradeEngine:
             price_diff_pct = -price_diff_pct
 
         # Tinh PnL cua phan nay
+        leverage = pos.get("leverage", 1)
         closed_size = pos["usdt_size"] * pct_to_close
+        closed_margin = closed_size / leverage
         pnl = closed_size * price_diff_pct
 
-        # Cap nhat tong L/L vao vi
-        self.balance += (closed_size + pnl)  # Tra lai goc va cong/tru lai
+        # Cap nhat tong L/L vao vi (tra lai margin phan nay + pnl)
+        self.balance += (closed_margin + pnl)
 
         pos["closed_pct"] += pct_to_close
         pos["pnl"] += pnl
@@ -512,11 +703,13 @@ class TradeEngine:
         if not is_long:
             price_diff_pct = -price_diff_pct
 
+        leverage = pos.get("leverage", 1)
         rem_size = pos["usdt_size"] * rem_pct
+        rem_margin = rem_size / leverage
         pnl = rem_size * price_diff_pct
 
-        # Hoan tra goc va PnL vao Balance
-        self.balance += (rem_size + pnl)
+        # Hoan tra goc va PnL vao Balance (rem_margin + pnl)
+        self.balance += (rem_margin + pnl)
 
         pos["status"] = "CLOSED"
         pos["close_time"] = datetime.now().isoformat()
@@ -526,12 +719,31 @@ class TradeEngine:
 
         logger.info(f"PAPER TRADE DONG LENH: {sig_key} | Ly do: {reason} | PnL phan cuoi: ${pnl:.2f} | Tong PnL: ${pos['pnl']:.2f}")
 
-        # Dua vao history va xoa khoi open positions
-        self.history.append(pos)
-        del self.positions[sig_key]
+        # Dua vao history
+        self.history.append(dict(pos))  # Copy into history
+        # Giu position lai 30 giay de FE kip hien thi thong bao
+        # Cleanup se xoa sau boi _cleanup_closed()
+        pos["_closed_at"] = datetime.now().isoformat()
 
         self._save_data()
         return pos
+
+    def _cleanup_closed(self):
+        """Xoa cac position da dong qua 30 giay khoi dict positions."""
+        now = datetime.now()
+        keys_to_remove = []
+        for k, p in self.positions.items():
+            if p.get("status") == "CLOSED" and p.get("_closed_at"):
+                try:
+                    closed_at = datetime.fromisoformat(p["_closed_at"])
+                    if (now - closed_at).total_seconds() > 30:
+                        keys_to_remove.append(k)
+                except:
+                    keys_to_remove.append(k)
+        for k in keys_to_remove:
+            del self.positions[k]
+        if keys_to_remove:
+            self._save_data()
         
     def set_trailing_sl(self, sig_key: str, enable: bool) -> bool:
         """Bat/tat Trailing Stop Loss cho 1 position."""

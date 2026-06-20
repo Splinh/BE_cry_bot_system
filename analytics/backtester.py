@@ -200,8 +200,8 @@ class BacktestEngine:
                     if direction == "LONG":
                         liq = entry * (1 - 1 / leverage)
                         if row["low"] <= liq:
-                            pnl = -usdt_size * (1 - closed_pct)
-                            balance += pnl
+                            pnl = -(usdt_size / leverage) * (1 - closed_pct)
+                            # balance khong can cong vi da tru margin luc open, va bay gio bi thanh ly het margin con lai
                             open_position["close_price"] = liq
                             open_position["pnl"] = open_position.get("pnl", 0) + pnl
                             open_position["close_reason"] = "LIQUIDATED"
@@ -213,8 +213,8 @@ class BacktestEngine:
                     else:
                         liq = entry * (1 + 1 / leverage)
                         if row["high"] >= liq:
-                            pnl = -usdt_size * (1 - closed_pct)
-                            balance += pnl
+                            pnl = -(usdt_size / leverage) * (1 - closed_pct)
+                            # balance khong can cong vi da tru margin luc open
                             open_position["close_price"] = liq
                             open_position["pnl"] = open_position.get("pnl", 0) + pnl
                             open_position["close_reason"] = "LIQUIDATED"
@@ -228,9 +228,10 @@ class BacktestEngine:
                 if direction == "LONG" and row["low"] <= pos_sl:
                     rem_pct = 1.0 - closed_pct
                     rem_size = usdt_size * rem_pct
+                    rem_margin = rem_size / leverage
                     pnl_pct = (pos_sl - entry) / entry
-                    pnl = rem_size * pnl_pct * leverage
-                    balance += rem_size + pnl
+                    pnl = rem_size * pnl_pct
+                    balance += rem_margin + pnl
                     open_position["close_price"] = pos_sl
                     open_position["pnl"] = open_position.get("pnl", 0) + pnl
                     open_position["close_reason"] = "SL_HIT"
@@ -242,9 +243,10 @@ class BacktestEngine:
                 elif direction == "SHORT" and row["high"] >= pos_sl:
                     rem_pct = 1.0 - closed_pct
                     rem_size = usdt_size * rem_pct
+                    rem_margin = rem_size / leverage
                     pnl_pct = (entry - pos_sl) / entry
-                    pnl = rem_size * pnl_pct * leverage
-                    balance += rem_size + pnl
+                    pnl = rem_size * pnl_pct
+                    balance += rem_margin + pnl
                     open_position["close_price"] = pos_sl
                     open_position["pnl"] = open_position.get("pnl", 0) + pnl
                     open_position["close_reason"] = "SL_HIT"
@@ -258,9 +260,10 @@ class BacktestEngine:
                 if direction == "LONG" and row["high"] >= pos_tp3:
                     rem_pct = 1.0 - closed_pct
                     rem_size = usdt_size * rem_pct
+                    rem_margin = rem_size / leverage
                     pnl_pct = (pos_tp3 - entry) / entry
-                    pnl = rem_size * pnl_pct * leverage
-                    balance += rem_size + pnl
+                    pnl = rem_size * pnl_pct
+                    balance += rem_margin + pnl
                     open_position["close_price"] = pos_tp3
                     open_position["pnl"] = open_position.get("pnl", 0) + pnl
                     open_position["close_reason"] = "TP3_HIT"
@@ -272,9 +275,10 @@ class BacktestEngine:
                 elif direction == "SHORT" and row["low"] <= pos_tp3:
                     rem_pct = 1.0 - closed_pct
                     rem_size = usdt_size * rem_pct
+                    rem_margin = rem_size / leverage
                     pnl_pct = (entry - pos_tp3) / entry
-                    pnl = rem_size * pnl_pct * leverage
-                    balance += rem_size + pnl
+                    pnl = rem_size * pnl_pct
+                    balance += rem_margin + pnl
                     open_position["close_price"] = pos_tp3
                     open_position["pnl"] = open_position.get("pnl", 0) + pnl
                     open_position["close_reason"] = "TP3_HIT"
@@ -291,12 +295,13 @@ class BacktestEngine:
                     if hit_tp2:
                         pct_close = 0.3
                         close_size = usdt_size * pct_close
+                        close_margin = close_size / leverage
                         if direction == "LONG":
                             pnl_pct = (pos_tp2 - entry) / entry
                         else:
                             pnl_pct = (entry - pos_tp2) / entry
-                        pnl = close_size * pnl_pct * leverage
-                        balance += close_size + pnl
+                        pnl = close_size * pnl_pct
+                        balance += close_margin + pnl
                         open_position["closed_pct"] = closed_pct + pct_close
                         open_position["pnl"] = open_position.get("pnl", 0) + pnl
 
@@ -307,12 +312,13 @@ class BacktestEngine:
                     if hit_tp1:
                         pct_close = 0.3
                         close_size = usdt_size * pct_close
+                        close_margin = close_size / leverage
                         if direction == "LONG":
                             pnl_pct = (pos_tp1 - entry) / entry
                         else:
                             pnl_pct = (entry - pos_tp1) / entry
-                        pnl = close_size * pnl_pct * leverage
-                        balance += close_size + pnl
+                        pnl = close_size * pnl_pct
+                        balance += close_margin + pnl
                         open_position["closed_pct"] = open_position.get("closed_pct", 0) + pct_close
                         open_position["pnl"] = open_position.get("pnl", 0) + pnl
 
@@ -343,13 +349,21 @@ class BacktestEngine:
                         tp2 = price * (1 - tp2_pct)
                         tp3 = price * (1 - tp3_pct)
 
-                    # Tinh position size (risk-based)
+                    # Tinh position size (risk-based) va leverage
                     risk_amount = balance * risk_per_trade
                     if sl_pct > 0:
                         pos_size = risk_amount / sl_pct
                     else:
                         pos_size = risk_amount
-                    pos_size = min(pos_size, balance * 0.2)  # Max 20% balance
+                    
+                    # Gioi han margin su dung tren 1 lenh la 20% tai khoan (tranh qua muc)
+                    max_margin = balance * 0.2
+                    max_size = max_margin * leverage
+                    pos_size = min(pos_size, max_size)
+
+                    # Dam bao margin luon be hon so du kha dung
+                    max_possible_size = (balance * 0.95) * leverage
+                    pos_size = min(pos_size, max_possible_size)
 
                     if pos_size >= 10:  # Min $10
                         margin = pos_size / leverage
@@ -400,14 +414,15 @@ class BacktestEngine:
             direction = open_position["direction"]
             rem_pct = 1.0 - open_position.get("closed_pct", 0)
             rem_size = open_position["usdt_size"] * rem_pct
+            rem_margin = rem_size / leverage
 
             if direction == "LONG":
                 pnl_pct = (last_price - entry) / entry
             else:
                 pnl_pct = (entry - last_price) / entry
 
-            pnl = rem_size * pnl_pct * leverage
-            balance += rem_size + pnl
+            pnl = rem_size * pnl_pct
+            balance += rem_margin + pnl
             open_position["close_price"] = last_price
             open_position["pnl"] = open_position.get("pnl", 0) + pnl
             open_position["close_reason"] = "END_OF_DATA"

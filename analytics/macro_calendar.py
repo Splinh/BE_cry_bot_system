@@ -8,11 +8,12 @@ Nguon du lieu:
 3. CryptoPanic macro filter
 """
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
 from loguru import logger
+from aiohttp.resolver import ThreadedResolver
 
 
 # ============================================
@@ -180,7 +181,9 @@ class MacroCalendar:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
+            connector = aiohttp.TCPConnector(resolver=ThreadedResolver())
             self.session = aiohttp.ClientSession(
+                connector=connector,
                 timeout=aiohttp.ClientTimeout(total=10)
             )
         return self.session
@@ -238,7 +241,7 @@ class MacroCalendar:
             async with session.get(INVESTING_CALENDAR_URL) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    now = datetime.now()
+                    now = datetime.now(timezone.utc)
 
                     for item in data:
                         # Chi lay su kien USD (anh huong crypto nhieu nhat)
@@ -254,12 +257,15 @@ class MacroCalendar:
                         date_str = item.get("date", "")
 
                         try:
-                            ev_date = datetime.fromisoformat(date_str.replace("Z", "+00:00").replace("+00:00", ""))
+                            ev_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
                         except Exception:
                             try:
                                 ev_date = datetime.strptime(date_str[:19], "%Y-%m-%dT%H:%M:%S")
                             except Exception:
                                 continue
+
+                        if ev_date.tzinfo is None:
+                            ev_date = ev_date.replace(tzinfo=timezone.utc)
 
                         hours_until = (ev_date - now).total_seconds() / 3600
 

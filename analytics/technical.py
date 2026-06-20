@@ -11,6 +11,8 @@ import pandas as pd
 import pandas_ta as ta
 import ccxt.async_support as ccxt
 from loguru import logger
+import aiohttp
+from aiohttp.resolver import ThreadedResolver
 
 
 class TechnicalAnalyzer:
@@ -22,23 +24,65 @@ class TechnicalAnalyzer:
     """
 
     def __init__(self):
-        self.exchange = ccxt.binance({"enableRateLimit": True})
+        self.exchange = self._create_exchange()
+
+    def _create_exchange(self, endpoint: str = "api.binance.com"):
+        connector = aiohttp.TCPConnector(resolver=ThreadedResolver())
+        session = aiohttp.ClientSession(connector=connector)
+        exchange = ccxt.binance({
+            "enableRateLimit": True,
+            "session": session
+        })
+        if endpoint != "api.binance.com":
+            for key, val in list(exchange.urls["api"].items()):
+                if isinstance(val, str) and "api.binance.com" in val:
+                    exchange.urls["api"][key] = val.replace("api.binance.com", endpoint)
+        return exchange
+
+    async def _close_exchange_instance(self, exchange):
+        if exchange:
+            session = getattr(exchange, "session", None)
+            try:
+                await exchange.close()
+            except:
+                pass
+            if session and not session.closed:
+                try:
+                    await session.close()
+                except:
+                    pass
 
     async def close(self):
-        await self.exchange.close()
+        await self._close_exchange_instance(self.exchange)
 
     async def get_ohlcv(self, symbol: str = "BTC/USDT", timeframe: str = "1h", limit: int = 100) -> pd.DataFrame:
         """Lay du lieu nen (Open, High, Low, Close, Volume) tu Binance."""
-        try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df.set_index("timestamp", inplace=True)
-            logger.info(f"Lay {len(df)} nen {symbol} {timeframe}")
-            return df
-        except Exception as e:
-            logger.error(f"Loi lay OHLCV {symbol}: {e}")
-            return pd.DataFrame()
+        endpoints = [
+            "api.binance.com",
+            "api-gcp.binance.com",
+            "api1.binance.com",
+            "api2.binance.com",
+            "api3.binance.com",
+        ]
+        # Dong exchange hien tai de khoi tao lai
+        await self._close_exchange_instance(self.exchange)
+            
+        for endpoint in endpoints:
+            try:
+                self.exchange = self._create_exchange(endpoint)
+                ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+                df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                df.set_index("timestamp", inplace=True)
+                logger.info(f"Lay {len(df)} nen {symbol} {timeframe} tu endpoint {endpoint}")
+                return df
+            except Exception as e:
+                logger.warning(f"Loi lay OHLCV {symbol} tu endpoint {endpoint}: {e}")
+                await self._close_exchange_instance(self.exchange)
+        
+        # Khoi tao lai exchange mac dinh truoc khi ket thuc
+        self.exchange = self._create_exchange()
+        return pd.DataFrame()
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Tinh tat ca chi bao ky thuat tren DataFrame."""
@@ -150,10 +194,11 @@ class TechnicalAnalyzer:
             atr = float(tr) if tr > 0 else price * 0.02
 
         # === ATR MULTIPLIER theo leverage ===
+        # Tang len so voi truoc de SL/TP khong qua chat voi don bay lon
         if leverage >= 50:
-            atr_mult = 0.3
+            atr_mult = 0.5      # 0.3 -> 0.5 (rong hon)
         elif leverage >= 25:
-            atr_mult = 0.5
+            atr_mult = 0.7      # 0.5 -> 0.7
         elif leverage >= 10:
             atr_mult = 1.0
         elif leverage >= 5:
@@ -169,6 +214,24 @@ class TechnicalAnalyzer:
             macro_mult = 1.6  # Mo rong SL 60% truoc FOMC/CPI
 
         atr_distance = atr * atr_mult * macro_mult
+
+        # === MINIMUM DISTANCE GUARD (leverage-aware) ===
+        # Leverage cao can nhieu room hon de tranh bi quet SL trong vai phut
+        # min_pct dam bao SL cach entry it nhat X% cua gia
+        if leverage >= 100:
+            min_pct = 0.004     # 0.4% — 125x liq = 0.8%, SL cach 50% liq
+        elif leverage >= 50:
+            min_pct = 0.006     # 0.6% — 50x liq = 2%, SL cach 30% liq
+        elif leverage >= 25:
+            min_pct = 0.008     # 0.8%
+        elif leverage >= 10:
+            min_pct = 0.010     # 1.0%
+        else:
+            min_pct = 0.015     # 1.5% cho leverage thap, cho thoai mai
+
+        min_sl_distance = max(atr * 0.7, price * min_pct)
+        # Dam bao atr_distance khong nho hon min
+        atr_distance = max(atr_distance, min_sl_distance)
 
         # === LAY S/R LEVELS ===
         support1 = self._safe_float(latest.get("support1"), price * 0.97)
@@ -220,6 +283,11 @@ class TechnicalAnalyzer:
                 sl = liq_price + atr * 0.1
                 method_parts.append("Liq-protected")
 
+            # === MIN DISTANCE GUARD cho SL ===
+            if abs(price - sl) < min_sl_distance:
+                sl = price - min_sl_distance
+                method_parts.append(f"Min-guard SL: ${sl:.2f}")
+
             # === TP cho LONG ===
             # Tim resistance tren gia
             resistances_above = sorted(
@@ -230,13 +298,24 @@ class TechnicalAnalyzer:
             if resistances_above:
                 target_r = resistances_above[-1]  # Resistance xa nhat
                 room = target_r - price
+                # Dam bao room it nhat = 2x SL distance (RR >= 1:1 cho TP1)
+                min_room = abs(price - sl) * 3
+                room = max(room, min_room)
                 tp1 = price + room * 0.382  # Fib 38.2%
                 tp2 = price + room * 0.618  # Fib 61.8%
-                tp3 = target_r
+                tp3 = price + room
             else:
                 tp1 = price + atr_distance * 1.5
                 tp2 = price + atr_distance * 3.0
                 tp3 = price + atr_distance * 5.0
+
+            # === MIN TP GUARD ===
+            min_tp1 = price + atr_distance * 1.5
+            min_tp2 = price + atr_distance * 3.0
+            min_tp3 = price + atr_distance * 5.0
+            tp1 = max(tp1, min_tp1)
+            tp2 = max(tp2, min_tp2)
+            tp3 = max(tp3, min_tp3)
 
         else:  # SHORT
             # === SL cho SHORT ===
@@ -260,6 +339,11 @@ class TechnicalAnalyzer:
                 sl = liq_price - atr * 0.1
                 method_parts.append("Liq-protected")
 
+            # === MIN DISTANCE GUARD cho SL ===
+            if abs(sl - price) < min_sl_distance:
+                sl = price + min_sl_distance
+                method_parts.append(f"Min-guard SL: ${sl:.2f}")
+
             # === TP cho SHORT ===
             supports_below = sorted(
                 [s for s in [support1, support2, bb_lower]
@@ -270,13 +354,24 @@ class TechnicalAnalyzer:
             if supports_below:
                 target_s = supports_below[-1]  # Support xa nhat
                 room = price - target_s
+                # Dam bao room it nhat = 2x SL distance
+                min_room = abs(sl - price) * 3
+                room = max(room, min_room)
                 tp1 = price - room * 0.382
                 tp2 = price - room * 0.618
-                tp3 = target_s
+                tp3 = price - room
             else:
                 tp1 = price - atr_distance * 1.5
                 tp2 = price - atr_distance * 3.0
                 tp3 = price - atr_distance * 5.0
+
+            # === MIN TP GUARD ===
+            min_tp1 = price - atr_distance * 1.5
+            min_tp2 = price - atr_distance * 3.0
+            min_tp3 = price - atr_distance * 5.0
+            tp1 = min(tp1, min_tp1)
+            tp2 = min(tp2, min_tp2)
+            tp3 = min(tp3, min_tp3)
 
         # Tinh cac chi so
         sl_pct = abs(price - sl) / price
@@ -305,6 +400,200 @@ class TechnicalAnalyzer:
             "macro_risk": macro_risk,
             "leverage": leverage,
         }
+
+    def compute_limit_entries(
+        self,
+        df: pd.DataFrame,
+        leverage: int = 1,
+    ) -> list:
+        """
+        Phan tich cac muc gia tot de dat lenh cho (limit order).
+        Dua tren Support/Resistance, Fibonacci, Bollinger Bands, EMA, VWAP.
+        Tra ve list cac entry zone sap xep theo do manh (score).
+        """
+        if df.empty or len(df) < 20:
+            return []
+
+        latest = df.iloc[-1]
+        price = float(latest["close"])
+        atr = float(latest.get("atr", 0))
+        if atr <= 0 or pd.isna(atr):
+            atr = price * 0.02
+
+        entries = []
+
+        # === S/R Levels ===
+        support1 = self._safe_float(latest.get("support1"), 0)
+        support2 = self._safe_float(latest.get("support2"), 0)
+        resistance1 = self._safe_float(latest.get("resistance1"), 0)
+        resistance2 = self._safe_float(latest.get("resistance2"), 0)
+
+        # Buy limit tai Support (chi khi support duoi gia hien tai)
+        if support1 > 0 and support1 < price:
+            dist_pct = abs(price - support1) / price * 100
+            if dist_pct > 0.1 and dist_pct < 5:
+                entries.append({
+                    "direction": "LONG",
+                    "entry_price": round(support1, 4),
+                    "type": "LIMIT_BUY",
+                    "reason": f"Support S1 (Pivot Point)",
+                    "distance_pct": round(dist_pct, 2),
+                    "score": 8 if dist_pct < 2 else 6,
+                    "zone": "support",
+                })
+
+        if support2 > 0 and support2 < price:
+            dist_pct = abs(price - support2) / price * 100
+            if dist_pct > 0.3 and dist_pct < 8:
+                entries.append({
+                    "direction": "LONG",
+                    "entry_price": round(support2, 4),
+                    "type": "LIMIT_BUY",
+                    "reason": f"Support S2 (Pivot Point manh)",
+                    "distance_pct": round(dist_pct, 2),
+                    "score": 9 if dist_pct < 3 else 7,
+                    "zone": "support",
+                })
+
+        # Sell limit tai Resistance
+        if resistance1 > 0 and resistance1 > price:
+            dist_pct = abs(resistance1 - price) / price * 100
+            if dist_pct > 0.1 and dist_pct < 5:
+                entries.append({
+                    "direction": "SHORT",
+                    "entry_price": round(resistance1, 4),
+                    "type": "LIMIT_SELL",
+                    "reason": f"Resistance R1 (Pivot Point)",
+                    "distance_pct": round(dist_pct, 2),
+                    "score": 8 if dist_pct < 2 else 6,
+                    "zone": "resistance",
+                })
+
+        if resistance2 > 0 and resistance2 > price:
+            dist_pct = abs(resistance2 - price) / price * 100
+            if dist_pct > 0.3 and dist_pct < 8:
+                entries.append({
+                    "direction": "SHORT",
+                    "entry_price": round(resistance2, 4),
+                    "type": "LIMIT_SELL",
+                    "reason": f"Resistance R2 (Pivot Point manh)",
+                    "distance_pct": round(dist_pct, 2),
+                    "score": 9 if dist_pct < 3 else 7,
+                    "zone": "resistance",
+                })
+
+        # === Fibonacci Levels ===
+        fib_382 = self._safe_float(latest.get("fib_382"), 0)
+        fib_500 = self._safe_float(latest.get("fib_500"), 0)
+        fib_618 = self._safe_float(latest.get("fib_618"), 0)
+
+        for fib_level, fib_name, base_score in [
+            (fib_618, "Fibonacci 61.8%", 9),
+            (fib_500, "Fibonacci 50.0%", 7),
+            (fib_382, "Fibonacci 38.2%", 6),
+        ]:
+            if fib_level > 0 and fib_level < price:
+                dist_pct = abs(price - fib_level) / price * 100
+                if dist_pct > 0.2 and dist_pct < 10:
+                    entries.append({
+                        "direction": "LONG",
+                        "entry_price": round(fib_level, 4),
+                        "type": "LIMIT_BUY",
+                        "reason": f"{fib_name} (Buy Zone)",
+                        "distance_pct": round(dist_pct, 2),
+                        "score": base_score,
+                        "zone": "fibonacci",
+                    })
+
+        # === Bollinger Bands ===
+        bb_lower = self._safe_float(latest.get("bb_lower"), 0)
+        bb_upper = self._safe_float(latest.get("bb_upper"), 0)
+
+        if bb_lower > 0 and bb_lower < price:
+            dist_pct = abs(price - bb_lower) / price * 100
+            if dist_pct > 0.2 and dist_pct < 6:
+                entries.append({
+                    "direction": "LONG",
+                    "entry_price": round(bb_lower, 4),
+                    "type": "LIMIT_BUY",
+                    "reason": "Bollinger Band duoi (qua ban)",
+                    "distance_pct": round(dist_pct, 2),
+                    "score": 8,
+                    "zone": "bollinger",
+                })
+
+        if bb_upper > 0 and bb_upper > price:
+            dist_pct = abs(bb_upper - price) / price * 100
+            if dist_pct > 0.2 and dist_pct < 6:
+                entries.append({
+                    "direction": "SHORT",
+                    "entry_price": round(bb_upper, 4),
+                    "type": "LIMIT_SELL",
+                    "reason": "Bollinger Band tren (qua mua)",
+                    "distance_pct": round(dist_pct, 2),
+                    "score": 8,
+                    "zone": "bollinger",
+                })
+
+        # === EMA levels ===
+        ema20 = self._safe_float(latest.get("ema20"), 0)
+        ema50 = self._safe_float(latest.get("ema50"), 0)
+
+        if ema20 > 0 and ema20 < price:
+            dist_pct = abs(price - ema20) / price * 100
+            if dist_pct > 0.1 and dist_pct < 4:
+                entries.append({
+                    "direction": "LONG",
+                    "entry_price": round(ema20, 4),
+                    "type": "LIMIT_BUY",
+                    "reason": "EMA20 (ho tro dong)",
+                    "distance_pct": round(dist_pct, 2),
+                    "score": 7,
+                    "zone": "ema",
+                })
+
+        if ema50 > 0 and ema50 < price:
+            dist_pct = abs(price - ema50) / price * 100
+            if dist_pct > 0.2 and dist_pct < 6:
+                entries.append({
+                    "direction": "LONG",
+                    "entry_price": round(ema50, 4),
+                    "type": "LIMIT_BUY",
+                    "reason": "EMA50 (ho tro xu huong)",
+                    "distance_pct": round(dist_pct, 2),
+                    "score": 8,
+                    "zone": "ema",
+                })
+
+        # === VWAP ===
+        vwap = self._safe_float(latest.get("vwap"), 0)
+        if vwap > 0:
+            dist_pct = abs(price - vwap) / price * 100
+            if dist_pct > 0.1 and dist_pct < 5:
+                if vwap < price:
+                    entries.append({
+                        "direction": "LONG",
+                        "entry_price": round(vwap, 4),
+                        "type": "LIMIT_BUY",
+                        "reason": "VWAP (gia binh quan theo volume)",
+                        "distance_pct": round(dist_pct, 2),
+                        "score": 7,
+                        "zone": "vwap",
+                    })
+                else:
+                    entries.append({
+                        "direction": "SHORT",
+                        "entry_price": round(vwap, 4),
+                        "type": "LIMIT_SELL",
+                        "reason": "VWAP (gia binh quan theo volume)",
+                        "distance_pct": round(dist_pct, 2),
+                        "score": 7,
+                        "zone": "vwap",
+                    })
+
+        # Sap xep theo score giam dan
+        entries.sort(key=lambda x: x["score"], reverse=True)
+        return entries[:8]  # Top 8 muc gia tot nhat
 
     @staticmethod
     def _safe_float(val, fallback: float = 0.0) -> float:
@@ -445,14 +734,38 @@ class TechnicalAnalyzer:
 
         if bull_score >= min_score and bull_score > bear_score:
             direction = "LONG"
-            sl = price * 0.985   # Stop Loss -1.5%
-            tp = price * 1.035   # Take Profit +3.5%
         elif bear_score >= min_score and bear_score > bull_score:
             direction = "SHORT"
+        else:
+            direction = None
+
+        # --- TREND FILTERS (Ngan chan giao dich nguoc xu huong) ---
+        ema50 = latest.get("ema50")
+        ema200 = latest.get("ema200")
+        
+        if direction == "LONG":
+            if ema50 is not None and pd.notna(ema50) and price < ema50:
+                direction = None
+                reasons.append("Huy LONG: Gia duoi EMA50 (Nguoc xu huong)")
+            elif ema200 is not None and pd.notna(ema200) and price < ema200:
+                direction = None
+                reasons.append("Huy LONG: Gia duoi EMA200 (Nguoc xu huong)")
+        elif direction == "SHORT":
+            if ema50 is not None and pd.notna(ema50) and price > ema50:
+                direction = None
+                reasons.append("Huy SHORT: Gia tren EMA50 (Nguoc xu huong)")
+            elif ema200 is not None and pd.notna(ema200) and price > ema200:
+                direction = None
+                reasons.append("Huy SHORT: Gia tren EMA200 (Nguoc xu huong)")
+
+        if direction == "LONG":
+            sl = price * 0.985   # Stop Loss -1.5%
+            tp = price * 1.035   # Take Profit +3.5%
+        elif direction == "SHORT":
             sl = price * 1.015   # Stop Loss +1.5%
             tp = price * 0.965   # Take Profit -3.5%
         else:
-            # Khong du diem -> khong ra tin hieu, tra ve trang thai phan tich
+            # Khong du diem hoac bi trend filter loc -> khong ra tin hieu, tra ve trang thai phan tich
             return {
                 "symbol": symbol,
                 "price": price,
