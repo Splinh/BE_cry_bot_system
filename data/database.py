@@ -142,6 +142,7 @@ class Database:
         """)
         conn.commit()
         self._migrate_users_table()
+        self._migrate_account_table()
         self._seed_default_admin()
         logger.info(f"SQLite DB ready: {self.DB_PATH}")
 
@@ -152,6 +153,20 @@ class Database:
         conn = self._get_conn()
         row = conn.execute("SELECT balance FROM account WHERE id=1").fetchone()
         return row["balance"] if row else 10000
+
+    def get_live_mode(self) -> bool:
+        conn = self._get_conn()
+        try:
+            row = conn.execute("SELECT live_mode FROM account WHERE id=1").fetchone()
+            return bool(row["live_mode"]) if row and "live_mode" in row.keys() else False
+        except Exception:
+            return False
+
+    def set_live_mode(self, enabled: bool):
+        conn = self._get_conn()
+        conn.execute("UPDATE account SET live_mode=?, updated_at=? WHERE id=1",
+                     (int(enabled), datetime.now().isoformat()))
+        conn.commit()
 
     def update_balance(self, balance: float, auto_trade: bool = None):
         conn = self._get_conn()
@@ -430,6 +445,19 @@ class Database:
             (all_perms,)
         )
         conn.commit()
+
+    def _migrate_account_table(self):
+        """Add live_mode column if it doesn't exist."""
+        conn = self._get_conn()
+        cursor = conn.execute("PRAGMA table_info(account)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "live_mode" not in columns:
+            try:
+                conn.execute("ALTER TABLE account ADD COLUMN live_mode INTEGER DEFAULT 0")
+                conn.commit()
+                logger.info("Migrated account table: added 'live_mode'")
+            except Exception as e:
+                logger.warning(f"Migration 'live_mode' skipped: {e}")
 
     def _seed_default_admin(self):
         """Create default admin if no users exist."""

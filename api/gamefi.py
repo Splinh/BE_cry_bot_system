@@ -361,7 +361,39 @@ class GameFiProject(BaseModel):
 @router.get("/")
 def get_projects():
     projects = db.get_gamefi_projects()
-    return {"projects": projects, "count": len(projects)}
+    enriched_projects = []
+    for p in projects:
+        p_dict = dict(p)
+        sym = p_dict["symbol"].upper()
+        if sym in GAMEFI_DATABASE:
+            est = GAMEFI_DATABASE[sym]
+            p_dict["category"] = est.get("category", "")
+            p_dict["platform"] = est.get("platform", [])
+            p_dict["earn_model"] = est.get("earn_model", "")
+            p_dict["website"] = est.get("website", "")
+            p_dict["play_url"] = est.get("play_url", "")
+            p_dict["marketplace_url"] = est.get("marketplace_url", "")
+            p_dict["how_to_earn"] = est.get("how_to_earn", [])
+            p_dict["min_investment"] = est.get("min_investment", "")
+            p_dict["risk_level"] = est.get("risk_level", "MEDIUM")
+            p_dict["status"] = est.get("status", "unknown")
+            p_dict["image"] = est.get("image", "")
+            p_dict["price"] = p_dict.get("token_price", 0.0)
+        else:
+            p_dict["category"] = "GameFi / Unknown"
+            p_dict["platform"] = []
+            p_dict["earn_model"] = "Chưa xác định"
+            p_dict["website"] = ""
+            p_dict["play_url"] = ""
+            p_dict["marketplace_url"] = ""
+            p_dict["how_to_earn"] = ["⚠ Chưa có hướng dẫn chi tiết — cần research thêm"]
+            p_dict["min_investment"] = "Chưa rõ"
+            p_dict["risk_level"] = "HIGH"
+            p_dict["status"] = "unknown"
+            p_dict["image"] = ""
+            p_dict["price"] = p_dict.get("token_price", 0.0)
+        enriched_projects.append(p_dict)
+    return {"projects": enriched_projects, "count": len(enriched_projects)}
 
 @router.post("/")
 def add_project(req: GameFiProject):

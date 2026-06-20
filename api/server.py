@@ -290,6 +290,35 @@ def get_trading():
         "open_positions": positions,
     }
 
+class TradingConfigReq(BaseModel):
+    live_mode: bool
+
+@app.get("/api/trading/config")
+def get_trading_config():
+    from data.database import db
+    from core.config import Config
+    
+    live_mode = db.get_live_mode()
+    has_api_keys = bool(Config.BINANCE_API_KEY and Config.BINANCE_API_SECRET)
+    
+    return {
+        "live_mode": live_mode,
+        "has_api_keys": has_api_keys
+    }
+
+@app.post("/api/trading/config")
+def update_trading_config(req: TradingConfigReq):
+    from data.database import db
+    from core.config import Config
+    
+    if req.live_mode:
+        if not Config.BINANCE_API_KEY or not Config.BINANCE_API_SECRET:
+            raise HTTPException(400, "Không thể bật Live Mode do chưa cấu hình BINANCE_API_KEY/SECRET trong .env")
+            
+    db.set_live_mode(req.live_mode)
+    logger.info(f"[Web] Live Mode -> {req.live_mode}")
+    return {"success": True, "live_mode": req.live_mode}
+
 @app.get("/api/trading/history")
 def get_history():
     te = ctx["trade_engine"]

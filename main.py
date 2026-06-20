@@ -50,6 +50,161 @@ signal_tracker = SignalTracker(trade_engine=trade_engine)
 listing_scanner = ListingScanner()
 security = SecurityManager()
 telegram_manager = TelegramManager()
+
+from functools import wraps
+
+def requires_whitelist(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if not update.effective_chat or not update.message:
+            return
+        chat_id = update.effective_chat.id
+        
+        # Cho phép lệnh /start và /register chạy không cần whitelist
+        if func.__name__ in ("cmd_start", "cmd_register"):
+            return await func(update, context, *args, **kwargs)
+            
+        action = func.__name__.replace("cmd_", "")
+        access = security.check_access(chat_id, action)
+        if not access["allowed"]:
+            await update.message.reply_text(f"🛡️ {access['reason']}", parse_mode="HTML")
+            return
+            
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+# --- Admin & Registration Handlers ---
+async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /register - Người dùng yêu cầu quyền truy cập bot."""
+    if not update.effective_chat or not update.message:
+        return
+    chat_id = update.effective_chat.id
+    username = update.effective_user.username or "NoUsername"
+    first_name = update.effective_user.first_name or "User"
+    
+    if security.is_whitelisted(chat_id):
+        await update.message.reply_text("✅ Bạn đã nằm trong whitelist rồi!")
+        return
+
+    admins = security.config.get("admin_ids", [])
+    if not admins:
+        # Nếu chưa có admin nào, tự động cho phép người đầu tiên
+        security.add_admin(chat_id)
+        await update.message.reply_text(
+            f"👑 Bạn đã được tự động cấp quyền <b>ADMIN</b> do hệ thống chưa có Admin.\n"
+            f"Chat ID của bạn: <code>{chat_id}</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    await update.message.reply_text(
+        f"⏳ Yêu cầu truy cập của bạn đã được gửi tới Admin.\n"
+        f"Chat ID: <code>{chat_id}</code>\nVui lòng đợi phê duyệt.",
+        parse_mode="HTML"
+    )
+
+    for admin_id in admins:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"🔔 <b>YÊU CẦU ĐĂNG KÝ MỚI!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <b>Tên:</b> {first_name}\n"
+                    f"🏷️ <b>Username:</b> @{username}\n"
+                    f"🆔 <b>Chat ID:</b> <code>{chat_id}</code>\n\n"
+                    f"Phê duyệt bằng cách gõ:\n"
+                    f"👉 <code>/approve {chat_id}</code>\n"
+                    f"Từ chối bằng cách gõ:\n"
+                    f"👉 <code>/deny {chat_id}</code>"
+                ),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Lỗi gửi tin nhắn đăng ký cho admin {admin_id}: {e}")
+
+async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /approve [chat_id] - Admin phê duyệt quyền truy cập."""
+    chat_id = update.effective_chat.id
+    if not security.is_admin(chat_id):
+        await update.message.reply_text("⛔ Chỉ Admin mới có quyền thực hiện lệnh này.")
+        return
+        
+    if not context.args:
+        await update.message.reply_text("Cú pháp: `/approve [Chat ID]`", parse_mode="Markdown")
+        return
+        
+    try:
+        target_id = int(context.args[0])
+        security.add_whitelist(target_id)
+        await update.message.reply_text(f"✅ Đã duyệt Chat ID <code>{target_id}</code> vào whitelist.", parse_mode="HTML")
+        
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text="🎉 <b>Chúc mừng!</b> Yêu cầu truy cập của bạn đã được phê duyệt. Gõ /menu hoặc gửi tên token (ví dụ: <code>BTC</code>) để bắt đầu.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Không thể gửi thông báo cho user {target_id}: {e}")
+    except ValueError:
+        await update.message.reply_text("Chat ID phải là số.")
+
+async def cmd_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /deny [chat_id] - Admin từ chối quyền truy cập."""
+    chat_id = update.effective_chat.id
+    if not security.is_admin(chat_id):
+        await update.message.reply_text("⛔ Chỉ Admin mới có quyền thực hiện lệnh này.")
+        return
+        
+    if not context.args:
+        await update.message.reply_text("Cú pháp: `/deny [Chat ID]`", parse_mode="Markdown")
+        return
+        
+    try:
+        target_id = int(context.args[0])
+        await update.message.reply_text(f"❌ Đã từ chối Chat ID <code>{target_id}</code>.", parse_mode="HTML")
+        
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text="❌ Yêu cầu truy cập bot của bạn đã bị từ chối bởi Admin.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Không thể gửi thông báo cho user {target_id}: {e}")
+    except ValueError:
+        await update.message.reply_text("Chat ID phải là số.")
+
+async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /remove [chat_id] - Xóa user khỏi whitelist."""
+    chat_id = update.effective_chat.id
+    if not security.is_admin(chat_id):
+        await update.message.reply_text("⛔ Chỉ Admin mới có quyền thực hiện lệnh này.")
+        return
+        
+    if not context.args:
+        await update.message.reply_text("Cú pháp: `/remove [Chat ID]`", parse_mode="Markdown")
+        return
+        
+    try:
+        target_id = int(context.args[0])
+        if target_id in security.config.get("admin_ids", []):
+            await update.message.reply_text("⚠️ Không thể xóa Admin khỏi whitelist.")
+            return
+        security.remove_whitelist(target_id)
+        await update.message.reply_text(f"❌ Đã xóa Chat ID <code>{target_id}</code> khỏi whitelist.", parse_mode="HTML")
+        
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text="⚠️ Bạn đã bị thu hồi quyền truy cập bot.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+    except ValueError:
+        await update.message.reply_text("Chat ID phải là số.")
 twitter_manager = TwitterManager()
 price_monitor = PriceMonitor()
 wallet_manager = WalletManager()
@@ -1873,58 +2028,64 @@ def main():
     # Tao ung dung
     app = Application.builder().token(token).build()
 
-    # Dang ky lenh
+    # Dang ky lenh (Không cần check whitelist)
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("menu", cmd_menu))
-    app.add_handler(CommandHandler("scan", cmd_scan))
-    app.add_handler(CommandHandler("news", cmd_news))
+    app.add_handler(CommandHandler("register", cmd_register))
+    app.add_handler(CommandHandler("approve", cmd_approve))
+    app.add_handler(CommandHandler("deny", cmd_deny))
+    app.add_handler(CommandHandler("remove", cmd_remove))
+
+    # Cần check whitelist
+    app.add_handler(CommandHandler("menu", requires_whitelist(cmd_menu)))
+    app.add_handler(CommandHandler("scan", requires_whitelist(cmd_scan)))
+    app.add_handler(CommandHandler("news", requires_whitelist(cmd_news)))
 
     # Airdrop commands
-    app.add_handler(CommandHandler("wallet", cmd_wallet))
-    app.add_handler(CommandHandler("wallets", cmd_wallets))
-    app.add_handler(CommandHandler("balance", cmd_balance))
-    app.add_handler(CommandHandler("networks", cmd_networks))
-    app.add_handler(CommandHandler("farm", cmd_farm))
-    app.add_handler(CommandHandler("claim", cmd_claim))
+    app.add_handler(CommandHandler("wallet", requires_whitelist(cmd_wallet)))
+    app.add_handler(CommandHandler("wallets", requires_whitelist(cmd_wallets)))
+    app.add_handler(CommandHandler("balance", requires_whitelist(cmd_balance)))
+    app.add_handler(CommandHandler("networks", requires_whitelist(cmd_networks)))
+    app.add_handler(CommandHandler("farm", requires_whitelist(cmd_farm)))
+    app.add_handler(CommandHandler("claim", requires_whitelist(cmd_claim)))
 
     # Signal commands
-    app.add_handler(CommandHandler("spot", cmd_spot))
-    app.add_handler(CommandHandler("futures", cmd_futures))
-    app.add_handler(CommandHandler("signals", cmd_signals))
+    app.add_handler(CommandHandler("spot", requires_whitelist(cmd_spot)))
+    app.add_handler(CommandHandler("futures", requires_whitelist(cmd_futures)))
+    app.add_handler(CommandHandler("signals", requires_whitelist(cmd_signals)))
 
     # Paper Trading / Auto-Trade commands
-    app.add_handler(CommandHandler("autotrade", cmd_autotrade))
-    app.add_handler(CommandHandler("paper", cmd_paper))
-    app.add_handler(CommandHandler("trailsl", cmd_trailsl))
-    app.add_handler(CommandHandler("alert", cmd_alert))
-    app.add_handler(CommandHandler("alerts", cmd_alerts))
+    app.add_handler(CommandHandler("autotrade", requires_whitelist(cmd_autotrade)))
+    app.add_handler(CommandHandler("paper", requires_whitelist(cmd_paper)))
+    app.add_handler(CommandHandler("trailsl", requires_whitelist(cmd_trailsl)))
+    app.add_handler(CommandHandler("alert", requires_whitelist(cmd_alert)))
+    app.add_handler(CommandHandler("alerts", requires_whitelist(cmd_alerts)))
 
     # DEX Gem commands
-    app.add_handler(CommandHandler("gem", cmd_gem))
-    app.add_handler(CommandHandler("newtoken", cmd_newtoken))
-    app.add_handler(CommandHandler("check", cmd_check))
-    app.add_handler(CommandHandler("buy", cmd_buy))
+    app.add_handler(CommandHandler("gem", requires_whitelist(cmd_gem)))
+    app.add_handler(CommandHandler("newtoken", requires_whitelist(cmd_newtoken)))
+    app.add_handler(CommandHandler("check", requires_whitelist(cmd_check)))
+    app.add_handler(CommandHandler("buy", requires_whitelist(cmd_buy)))
 
     # Social Automation
-    app.add_handler(CommandHandler("social", cmd_social))
-    app.add_handler(CommandHandler("claimall", cmd_claimall))
-    app.add_handler(CommandHandler("retweet", cmd_retweet))
+    app.add_handler(CommandHandler("social", requires_whitelist(cmd_social)))
+    app.add_handler(CommandHandler("claimall", requires_whitelist(cmd_claimall)))
+    app.add_handler(CommandHandler("retweet", requires_whitelist(cmd_retweet)))
 
     # Listing & CEX Airdrop commands
-    app.add_handler(CommandHandler("listing", cmd_listing))
-    app.add_handler(CommandHandler("monitor", cmd_monitor))
-    app.add_handler(CommandHandler("freeairdrop", cmd_freeairdrop))
+    app.add_handler(CommandHandler("listing", requires_whitelist(cmd_listing)))
+    app.add_handler(CommandHandler("monitor", requires_whitelist(cmd_monitor)))
+    app.add_handler(CommandHandler("freeairdrop", requires_whitelist(cmd_freeairdrop)))
 
     # Security commands
-    app.add_handler(CommandHandler("security", cmd_security))
-    app.add_handler(CommandHandler("setpin", cmd_setpin))
-    app.add_handler(CommandHandler("pin", cmd_pin))
-    app.add_handler(CommandHandler("whitelist", cmd_whitelist))
-    app.add_handler(CommandHandler("setlimit", cmd_setlimit))
-    app.add_handler(CommandHandler("audit", cmd_audit))
+    app.add_handler(CommandHandler("security", requires_whitelist(cmd_security)))
+    app.add_handler(CommandHandler("setpin", requires_whitelist(cmd_setpin)))
+    app.add_handler(CommandHandler("pin", requires_whitelist(cmd_pin)))
+    app.add_handler(CommandHandler("whitelist", requires_whitelist(cmd_whitelist)))
+    app.add_handler(CommandHandler("setlimit", requires_whitelist(cmd_setlimit)))
+    app.add_handler(CommandHandler("audit", requires_whitelist(cmd_audit)))
 
     # Bat ky tin nhan text nao -> phan tich token
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_token))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, requires_whitelist(analyze_token)))
 
     # Khoi dong Signal Tracker
     signal_tracker.start()
@@ -1947,6 +2108,10 @@ def main():
     async def start_services():
         # Khoi tao API task
         api_task = asyncio.create_task(run_server(port=8000))
+        
+        # Khoi dong Daily Report Scheduler
+        from utils.report_scheduler import start_report_scheduler
+        report_task = asyncio.create_task(start_report_scheduler())
         
         # Khoi dong Telegram Bot task
         await app.initialize()

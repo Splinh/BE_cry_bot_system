@@ -420,15 +420,14 @@ class TradeEngine:
         
         # Dam bao margin luon be hon so du kha dung
         max_possible_size = (self.balance * 0.95) * leverage
-        
         calculated_size = min(pos_size, max_size)
         return min(calculated_size, max_possible_size)
 
     def open_manual_position(self, coin: str, direction: str, usdt_size: float,
-                              leverage: int = 1, current_price: float = 0,
-                              smart_levels: Optional[dict] = None,
-                              wallet_id: Optional[int] = None,
-                              wallet_label: str = "") -> Optional[dict]:
+                             leverage: int = 1, current_price: float = 0,
+                             smart_levels: Optional[dict] = None,
+                             wallet_id: Optional[int] = None,
+                             wallet_label: str = "") -> Optional[dict]:
         """
         Mo lenh thu cong tu Web Dashboard.
         - Cung coin + cung direction + cung wallet -> DCA (gop lenh, binh quan gia)
@@ -437,20 +436,36 @@ class TradeEngine:
         """
         if usdt_size <= 0 or current_price <= 0:
             return None
-        
-        # Kiem tra du so du (margin = size / leverage)
+
+        is_live = sqlite_db and sqlite_db.get_live_mode()
         margin_required = usdt_size / leverage
+
+        if is_live:
+            self.sync_binance_balance()
+
         if margin_required > self.balance:
             logger.warning(f"Manual trade: Khong du so du. Can ${margin_required:.2f}, co ${self.balance:.2f}")
             return None
-        
+
+        # Thực thi lệnh Live trên Binance Futures
+        live_order = None
+        if is_live:
+            try:
+                live_order = self._execute_binance_trade(coin, direction, usdt_size, leverage)
+                if live_order and live_order.get("success"):
+                    current_price = live_order["price"]
+            except Exception as e:
+                logger.error(f"Failed to place live order on Binance: {e}")
+                return None
+
         # Tim lenh da mo: cung coin + cung direction + cung wallet
         existing_key = None
         for pos_key, pos_data in self.positions.items():
-            if (pos_data["coin"] == coin.upper() 
+            if (pos_data["coin"] == coin.upper()
                 and pos_data.get("direction") == direction.upper()
                 and pos_data.get("status") != "CLOSED"
-                and pos_data.get("wallet_id") == wallet_id):
+                and pos_data.get("wallet_id") == wallet_id
+                and pos_data.get("live", False) == is_live):
                 existing_key = pos_key
                 break
         
@@ -471,6 +486,9 @@ class TradeEngine:
             pos["dca_count"] = pos.get("dca_count", 0) + 1
             pos["last_dca_time"] = datetime.now().isoformat()
             pos["last_dca_price"] = current_price
+            if is_live and live_order:
+                pos["live_qty"] = pos.get("live_qty", 0.0) + live_order["amount"]
+                pos["binance_order_ids"] = pos.get("binance_order_ids", []) + [live_order["order_id"]]
             
             # Re-calculate SL/TP dua tren gia binh quan moi
             if smart_levels and not smart_levels.get("error"):
@@ -479,14 +497,18 @@ class TradeEngine:
                 pos["tp2"] = round(smart_levels["tp2"], 4)
                 pos["tp3"] = round(smart_levels["tp3"], 4)
             
-            self.balance -= margin_required
+            if not is_live:
+                self.balance -= margin_required
+            else:
+                self.sync_binance_balance()
+            
             self._save_data()
             
             logger.success(
                 f"DCA #{pos['dca_count']}: {direction} {coin} x{leverage} | "
                 f"+${usdt_size:.2f} -> Total: ${new_total_size:.2f} | "
                 f"Avg Entry: ${avg_entry:,.2f} (was ${old_entry:,.2f}) | "
-                f"Wallet: {wallet_label or 'Default'}"
+                f"Wallet: {wallet_label or 'Default'} | Live: {is_live}"
             )
             return pos
 
@@ -554,10 +576,19 @@ class TradeEngine:
             "wallet_id": wallet_id,
             "wallet_label": wallet_label or "",
             "dca_count": 0,
+            "live": is_live,
         }
 
+        if is_live and live_order:
+            pos["live_qty"] = live_order["amount"]
+            pos["binance_order_ids"] = [live_order["order_id"]]
+
         self.positions[sig_key] = pos
-        self.balance -= margin_required
+        if not is_live:
+            self.balance -= margin_required
+        else:
+            self.sync_binance_balance()
+
         self._save_data()
 
         liq_price = current_price * (1 - 1/leverage) if direction == "LONG" else current_price * (1 + 1/leverage)
@@ -565,24 +596,25 @@ class TradeEngine:
             f"MANUAL TRADE: {direction} {coin} x{leverage} | "
             f"Size: ${usdt_size:.2f} | Margin: ${margin_required:.2f} | "
             f"Entry: ${current_price:,.2f} | SL: ${sl:,.2f} | "
-            f"Liq: ~${liq_price:,.2f} | Wallet: {wallet_label or 'Default'}"
+            f"Liq: ~${liq_price:,.2f} | Wallet: {wallet_label or 'Default'} | Live: {is_live}"
         )
         return pos
 
     def open_position(self, signal: dict) -> Optional[dict]:
         """
-        Mo 1 lenh gia lap tu Signal do AI tao ra.
+        Mo 1 lenh gia lap hoac thuc te tu Signal do AI tao ra.
         Chi vao lenh khi auto_trade_enabled = True.
         """
         if not self.auto_trade_enabled:
             return None
 
+        is_live = sqlite_db and sqlite_db.get_live_mode()
         sig_key = signal["key"]
         
         # Da co vi the cho coin nay chua? De hieu, moi coin chi choi 1 lenh
         for pos_key, pos_data in self.positions.items():
-            if pos_data["coin"] == signal["coin"]:
-                logger.warning(f"Paper trade: Bo qua {sig_key} vi dang co lenh mo voi {signal['coin']}")
+            if pos_data["coin"] == signal["coin"] and pos_data.get("live", False) == is_live:
+                logger.warning(f"TradeEngine: Bo qua {sig_key} vi dang co lenh mo voi {signal['coin']} (Live: {is_live})")
                 return None
 
         entry = signal.get("entry", signal.get("price", 0))
@@ -590,14 +622,14 @@ class TradeEngine:
         direction = signal.get("direction", "LONG")
 
         if entry <= 0 or sl <= 0:
-            logger.warning(f"Paper trade: Signal thieu entry/sl -> Bo qua")
+            logger.warning(f"TradeEngine: Signal thieu entry/sl -> Bo qua")
             return None
 
         # Tinh toan khoi luong
         leverage = signal.get("leverage", 1)
         usdt_size = self.calculate_position_size(entry, sl, leverage)
         if usdt_size <= 10:  # Size < 10$ ko dang vao
-            logger.warning(f"Paper trade: Size qua xiu (${usdt_size:.2f}) -> Bo qua")
+            logger.warning(f"TradeEngine: Size qua xiu (${usdt_size:.2f}) -> Bo qua")
             return None
 
         # Tinh TP fallback neu signal chi co 1 tp
@@ -608,6 +640,24 @@ class TradeEngine:
 
         # Mo lenh
         margin_required = usdt_size / leverage
+
+        if is_live:
+            self.sync_binance_balance()
+
+        if margin_required > self.balance:
+            logger.warning(f"Auto trade: Khong du so du. Can ${margin_required:.2f}, co ${self.balance:.2f}")
+            return None
+
+        live_order = None
+        if is_live:
+            try:
+                live_order = self._execute_binance_trade(signal["coin"], direction, usdt_size, leverage)
+                if live_order and live_order.get("success"):
+                    entry = live_order["price"]
+            except Exception as e:
+                logger.error(f"Failed to place live order on Binance: {e}")
+                return None
+
         pos = {
             "key": sig_key,
             "coin": signal.get("coin", ""),
@@ -626,16 +676,24 @@ class TradeEngine:
             "close_price": 0.0,
             "pnl": 0.0,
             "status": "OPEN",  # OPEN, PARTIAL, CLOSED
-            "closed_pct": 0.0  # Phan tram da chot loi
+            "closed_pct": 0.0,  # Phan tram da chot loi
+            "live": is_live
         }
+
+        if is_live and live_order:
+            pos["live_qty"] = live_order["amount"]
+            pos["binance_order_ids"] = [live_order["order_id"]]
 
         self.positions[sig_key] = pos
         
         # Tru so du (Gia lap ky quy - Margin)
-        self.balance -= margin_required
+        if not is_live:
+            self.balance -= margin_required
+        else:
+            self.sync_binance_balance()
         self._save_data()
 
-        logger.success(f"PAPER TRADE MO LENH: {direction} {pos['coin']} | Size: ${usdt_size:.2f} | Entry: {entry}")
+        logger.success(f"TRADE MO LENH: {direction} {pos['coin']} | Size: ${usdt_size:.2f} | Entry: {entry} | Live: {is_live}")
         return pos
 
     def partial_close(self, sig_key: str, close_price: float, pct_to_close: float = 0.3) -> Optional[dict]:
@@ -667,13 +725,25 @@ class TradeEngine:
         closed_margin = closed_size / leverage
         pnl = closed_size * price_diff_pct
 
-        # Cap nhat tong L/L vao vi (tra lai margin phan nay + pnl)
-        self.balance += (closed_margin + pnl)
+        is_live = pos.get("live", False)
+        if is_live:
+            try:
+                live_qty = pos.get("live_qty", 0.0)
+                qty_to_close = live_qty * pct_to_close
+                if qty_to_close > 0:
+                    self._execute_binance_close(pos["coin"], pos["direction"], qty_to_close)
+            except Exception as e:
+                logger.error(f"Failed to partial close live order on Binance for {sig_key}: {e}")
+
+        if is_live:
+            self.sync_binance_balance()
+        else:
+            self.balance += (closed_margin + pnl)
 
         pos["closed_pct"] += pct_to_close
         pos["pnl"] += pnl
         
-        logger.info(f"PAPER TRADE CHOT 1 PHAN ({pct_to_close*100}%): {sig_key} | Gia chot: {close_price} | PnL tang: ${pnl:.2f}")
+        logger.info(f"TRADE CHOT 1 PHAN ({pct_to_close*100}%): {sig_key} | Gia chot: {close_price} | PnL tang: ${pnl:.2f} | Live: {is_live}")
 
         # Neu da chot het => Chuyen sang Close hoan toan
         if pos["closed_pct"] >= 0.99:
@@ -708,23 +778,31 @@ class TradeEngine:
         rem_margin = rem_size / leverage
         pnl = rem_size * price_diff_pct
 
-        # Hoan tra goc va PnL vao Balance (rem_margin + pnl)
-        self.balance += (rem_margin + pnl)
+        is_live = pos.get("live", False)
+        if is_live:
+            try:
+                live_qty = pos.get("live_qty", 0.0)
+                if live_qty > 0:
+                    self._execute_binance_close(pos["coin"], pos["direction"], live_qty)
+            except Exception as e:
+                logger.error(f"Failed to close live order on Binance for {sig_key}: {e}")
+
+        if is_live:
+            self.sync_binance_balance()
+        else:
+            self.balance += (rem_margin + pnl)
 
         pos["status"] = "CLOSED"
         pos["close_time"] = datetime.now().isoformat()
         pos["close_price"] = close_price
         pos["close_reason"] = reason
         pos["pnl"] += pnl
-
-        logger.info(f"PAPER TRADE DONG LENH: {sig_key} | Ly do: {reason} | PnL phan cuoi: ${pnl:.2f} | Tong PnL: ${pos['pnl']:.2f}")
-
-        # Dua vao history
-        self.history.append(dict(pos))  # Copy into history
-        # Giu position lai 30 giay de FE kip hien thi thong bao
-        # Cleanup se xoa sau boi _cleanup_closed()
         pos["_closed_at"] = datetime.now().isoformat()
 
+        logger.info(f"TRADE DONG LENH: {sig_key} | Ly do: {reason} | PnL phan cuoi: ${pnl:.2f} | Tong PnL: ${pos['pnl']:.2f} | Live: {is_live}")
+
+        # Dua vao history
+        self.history.append(dict(pos))
         self._save_data()
         return pos
 
@@ -754,8 +832,124 @@ class TradeEngine:
         logger.info(f"Trailing SL [{sig_key}]: {'ON' if enable else 'OFF'}")
         return True
 
+    def sync_binance_balance(self) -> float:
+        """Đồng bộ số dư thực tế từ Binance Futures về hệ thống."""
+        import ccxt
+        from core.config import Config
+        if not Config.BINANCE_API_KEY or not Config.BINANCE_API_SECRET:
+            return self.balance
+            
+        try:
+            exchange = ccxt.binance({
+                "apiKey": Config.BINANCE_API_KEY,
+                "secret": Config.BINANCE_API_SECRET,
+                "enableRateLimit": True,
+                "options": {"defaultType": "future"}
+            })
+            balance_data = exchange.fetch_balance()
+            real_balance = float(balance_data.get("total", {}).get("USDT", self.balance))
+            self.balance = real_balance
+            if sqlite_db:
+                sqlite_db.update_balance(self.balance)
+            return real_balance
+        except Exception as e:
+            logger.error(f"Error syncing Binance balance: {e}")
+            return self.balance
+
+    def _execute_binance_trade(self, symbol: str, direction: str, size_usdt: float, leverage: int) -> dict:
+        """Thực hiện đặt lệnh thực tế trên Binance Futures."""
+        import ccxt
+        from core.config import Config
+        
+        if not Config.BINANCE_API_KEY or not Config.BINANCE_API_SECRET:
+            logger.error("Binance API keys not configured in .env!")
+            raise Exception("Binance API keys not configured")
+            
+        try:
+            exchange = ccxt.binance({
+                "apiKey": Config.BINANCE_API_KEY,
+                "secret": Config.BINANCE_API_SECRET,
+                "enableRateLimit": True,
+                "options": {
+                    "defaultType": "future"
+                }
+            })
+            
+            ccxt_symbol = f"{symbol.upper()}/USDT"
+            
+            try:
+                exchange.set_leverage(leverage, ccxt_symbol)
+            except Exception as le:
+                logger.warning(f"Failed to set leverage: {le}")
+                
+            exchange.load_markets()
+            ticker = exchange.fetch_ticker(ccxt_symbol)
+            price = ticker["last"]
+            
+            raw_qty = size_usdt / price
+            qty = exchange.amount_to_precision(ccxt_symbol, raw_qty)
+            
+            side = "buy" if direction.upper() == "LONG" else "sell"
+            logger.info(f"[Live Trading] Placing order: {side.upper()} {qty} {ccxt_symbol}")
+            
+            order = exchange.create_market_order(
+                symbol=ccxt_symbol,
+                side=side,
+                amount=float(qty)
+            )
+            
+            logger.success(f"[Live Trading] Order placed successfully! ID: {order['id']}")
+            return {
+                "success": True,
+                "order_id": order["id"],
+                "price": order.get("price") or price,
+                "amount": order.get("amount") or float(qty),
+                "timestamp": order.get("timestamp")
+            }
+        except Exception as e:
+            logger.error(f"[Live Trading] Error placing Binance order: {e}")
+            raise e
+
+    def _execute_binance_close(self, symbol: str, direction: str, qty: float) -> dict:
+        """Thực hiện đóng vị thế thực tế trên Binance Futures."""
+        import ccxt
+        from core.config import Config
+        
+        if not Config.BINANCE_API_KEY or not Config.BINANCE_API_SECRET:
+            logger.error("Binance API keys not configured in .env!")
+            raise Exception("Binance API keys not configured")
+            
+        try:
+            exchange = ccxt.binance({
+                "apiKey": Config.BINANCE_API_KEY,
+                "secret": Config.BINANCE_API_SECRET,
+                "enableRateLimit": True,
+                "options": {
+                    "defaultType": "future"
+                }
+            })
+            
+            ccxt_symbol = f"{symbol.upper()}/USDT"
+            side = "sell" if direction.upper() == "LONG" else "buy"
+            logger.info(f"[Live Trading] Closing order: {side.upper()} {qty} {ccxt_symbol}")
+            
+            order = exchange.create_market_order(
+                symbol=ccxt_symbol,
+                side=side,
+                amount=qty,
+                params={"reduceOnly": True}
+            )
+            logger.success(f"[Live Trading] Close order placed successfully! ID: {order['id']}")
+            return {"success": True, "order_id": order["id"]}
+        except Exception as e:
+            logger.error(f"[Live Trading] Error closing Binance position: {e}")
+            raise e
+
     def get_portfolio_status(self) -> dict:
         """Tra lai trang thai tai khoan de lam bao cao."""
+        if sqlite_db and sqlite_db.get_live_mode():
+            self.sync_binance_balance()
+            
         total_pnl = sum([h.get("pnl", 0) for h in self.history])
         win_count = sum([1 for h in self.history if h.get("pnl", 0) > 0])
         total_trades = len(self.history)
