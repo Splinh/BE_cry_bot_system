@@ -6,6 +6,11 @@
 python-dotenv>=1.0.0        # Đọc file .env
 pydantic>=2.0.0             # Chuẩn hóa dữ liệu (Models)
 loguru>=0.7.0               # Logging đẹp, dễ debug
+fastapi>=0.100.0            # Web framework
+uvicorn>=0.20.0             # ASGI web server
+requests>=2.30.0            # Đồng bộ HTTP requests
+httpx>=0.24.0               # Bất đồng bộ HTTP requests
+cryptography>=41.0.0        # Mã hóa khóa bảo mật
 
 # --- Telegram Bot ---
 python-telegram-bot>=21.0   # Thư viện Telegram Bot chính thức
