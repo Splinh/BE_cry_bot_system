@@ -8,6 +8,7 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 data/*.json
+data/**/*.json
 data/*.json.bak
 *.log
 .DS_Store

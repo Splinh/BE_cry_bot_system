@@ -13,6 +13,7 @@ from typing import Optional
 import uvicorn
 from loguru import logger
 import httpx
+from analytics.technical import TechnicalAnalyzer
 
 app = FastAPI(title="Crypto Bot Dashboard API")
 
@@ -265,13 +266,17 @@ def get_trading():
             
             if direction == "LONG":
                 pnl = ((current_price - entry) / entry) * size * remaining_pct
+                pnl_pct = ((current_price - entry) / entry) * 100 if entry > 0 else 0
             else:
                 pnl = ((entry - current_price) / entry) * size * remaining_pct
+                pnl_pct = ((entry - current_price) / entry) * 100 if entry > 0 else 0
             
             pos["pnl"] = round(pnl, 2)
             pos["current_price"] = current_price
-            pos["pnl_pct"] = round(((current_price - entry) / entry) * 100, 2) if entry > 0 else 0
+            pos["pnl_pct"] = round(pnl_pct, 2)
             pos["change_24h"] = change_24h
+            pos["liq_price"] = p.get("liq_price", 0.0)
+            pos["fees_paid"] = p.get("fees_paid", 0.0)
             total_unrealized += pnl
         else:
             pos["current_price"] = 0
@@ -683,27 +688,27 @@ def get_scalping_signals():
             
             scalp_signals.append({
                 "coin": coin,
-                "price": round(price, 4),
+                "price": TechnicalAnalyzer._round_price(price, price),
                 "direction": direction,
                 "leverage": lev,
                 "timeframe": tf_label,
                 "type": "SPOT" if lev == 1 else "FUTURES",
                 "confidence": round(confidence),
                 "reasons": reasons,
-                "sl": round(sl, 4),
-                "tp1": round(tp1, 4),
-                "tp2": round(tp2, 4),
-                "tp3": round(tp3, 4),
+                "sl": TechnicalAnalyzer._round_price(sl, price),
+                "tp1": TechnicalAnalyzer._round_price(tp1, price),
+                "tp2": TechnicalAnalyzer._round_price(tp2, price),
+                "tp3": TechnicalAnalyzer._round_price(tp3, price),
                 "sl_pct": round(actual_sl_pct * 100, 2),
                 "tp1_pct": round(actual_tp1_pct * 100, 2),
                 "rr_ratio": round(rr, 2),
                 "potential_roi": round(potential_roi, 1),
                 "max_loss": round(max_loss, 1),
-                "liq_price": round(liq, 2),
+                "liq_price": TechnicalAnalyzer._round_price(liq, price),
                 "change_24h": round(change_24h, 2),
                 "day_range_pct": round(day_range_pct, 1),
-                "support": round(support, 4),
-                "resistance": round(resistance, 4),
+                "support": TechnicalAnalyzer._round_price(support, price),
+                "resistance": TechnicalAnalyzer._round_price(resistance, price),
             })
     
     # Sap xep: confidence cao + RR ratio tot nhat
@@ -711,20 +716,27 @@ def get_scalping_signals():
     return {"signals": scalp_signals}
 
 @app.get("/api/trading/analyze/{coin}")
-async def leverage_analyze(coin: str, leverage: int = 10, market_type: str = "futures"):
+async def leverage_analyze(coin: str, leverage: int = 10, market_type: str = "futures", timeframe: str = "auto"):
     """
     Phan tich ky thuat chi tiet cho 1 coin voi leverage cu the.
     Tra ve entry/SL/TP toi uu dua tren ATR + S/R + Fibonacci + Macro Events.
+    timeframe: 'auto' (chon theo leverage), hoac '1m','5m','15m','30m','1h','4h','1d'
     """
     from analytics.technical import TechnicalAnalyzer
     from analytics.macro_calendar import MacroCalendar
     
-    # Chon timeframe dua tren leverage
-    if leverage >= 50: timeframe = "5m"
-    elif leverage >= 20: timeframe = "15m"
-    elif leverage >= 10: timeframe = "1h"
-    elif leverage >= 5: timeframe = "4h"
-    else: timeframe = "1d"
+    VALID_TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"]
+    
+    # Chon timeframe: neu user chon thi dung, khong thi auto theo leverage
+    if timeframe != "auto" and timeframe in VALID_TIMEFRAMES:
+        pass  # use user-selected timeframe
+    else:
+        # Auto chon theo leverage
+        if leverage >= 50: timeframe = "5m"
+        elif leverage >= 20: timeframe = "15m"
+        elif leverage >= 10: timeframe = "1h"
+        elif leverage >= 5: timeframe = "4h"
+        else: timeframe = "1d"
     
     ta_engine = TechnicalAnalyzer()
     macro = MacroCalendar()
@@ -769,31 +781,50 @@ async def leverage_analyze(coin: str, leverage: int = 10, market_type: str = "fu
         rr = smart_levels["rr_ratio"]
         liq = smart_levels.get("liq_price") or (price * (1 - 1/leverage) if direction == "LONG" else price * (1 + 1/leverage))
         
+        # Generate Smart AI Recommendation
+        reasons_list = base_signal.get("reasons", [])
+        reasons_str = ", ".join(reasons_list) if reasons_list else "Không có lý do cụ thể"
+        
+        if raw_direction in ("LONG", "SHORT"):
+            ai_recommendation = f"Khuyến nghị VÀO LỆNH {raw_direction}. Lý do: {reasons_str}. Xu hướng đồng thuận."
+            is_recommended = True
+        else:
+            if any("Huy " in r for r in reasons_list):
+                ai_recommendation = f"KHÔNG NÊN VÀO LỆNH. Tín hiệu bị bộ lọc xu hướng hủy: {reasons_str}."
+            else:
+                ai_recommendation = f"KHÔNG NÊN VÀO LỆNH. Thị trường đang đi ngang lưỡng lự (Neutral). Bull: {base_signal.get('bull_score')} | Bear: {base_signal.get('bear_score')}."
+            is_recommended = False
+
         # Extract indicator values safely
-        def _sf(v, d=0): return round(float(v), 4) if v is not None and v == v else d
+        def _sf(v, d=0): return TechnicalAnalyzer._round_price(v, price) if v is not None and v == v else d
         
         base_signal.update({
-            "entry": round(price, 4),
-            "price": round(price, 4),
+            "ai_recommendation": ai_recommendation,
+            "is_recommended": is_recommended,
+            "entry": TechnicalAnalyzer._round_price(price, price),
+            "price": TechnicalAnalyzer._round_price(price, price),
             "leverage": leverage,
             "timeframe": timeframe,
             "market_type": market_type.upper(),
             "direction": raw_direction,
             "trade_direction": direction,
-            "sl": round(sl, 4),
-            "tp1": round(tp1, 4),
-            "tp2": round(tp2, 4),
-            "tp3": round(tp3, 4),
+            "sl": TechnicalAnalyzer._round_price(sl, price),
+            "tp1": TechnicalAnalyzer._round_price(tp1, price),
+            "tp2": TechnicalAnalyzer._round_price(tp2, price),
+            "tp3": TechnicalAnalyzer._round_price(tp3, price),
             "sl_pct": round(sl_pct * 100, 3),
             "tp1_pct": round(tp1_pct * 100, 3),
             "rr_ratio": round(rr, 2),
             "potential_roi": round(tp1_pct * leverage * 100, 1),
             "max_loss": round(sl_pct * leverage * 100, 1),
-            "liq_price": round(liq, 2),
-            "support": round(smart_levels.get("support", 0), 4),
-            "resistance": round(smart_levels.get("resistance", 0), 4),
-            "support2": round(smart_levels.get("support2", 0), 4),
-            "resistance2": round(smart_levels.get("resistance2", 0), 4),
+            "liq_price": TechnicalAnalyzer._round_price(liq, price),
+            "recommended_leverage": smart_levels.get("recommended_leverage"),
+            "ideal_sl_pct": smart_levels.get("ideal_sl_pct"),
+            "leverage_warning": smart_levels.get("leverage_warning"),
+            "support": TechnicalAnalyzer._round_price(smart_levels.get("support", 0), price),
+            "resistance": TechnicalAnalyzer._round_price(smart_levels.get("resistance", 0), price),
+            "support2": TechnicalAnalyzer._round_price(smart_levels.get("support2", 0), price),
+            "resistance2": TechnicalAnalyzer._round_price(smart_levels.get("resistance2", 0), price),
             "bb_lower": _sf(latest.get("bb_lower")),
             "bb_upper": _sf(latest.get("bb_upper")),
             "ema20": _sf(latest.get("ema20")),

@@ -30,7 +30,7 @@ class PriceMonitor:
         alert_threshold_pct: float = 3.0,
         update_interval_min: int = 30,
     ):
-        self.symbols = symbols or ["btcusdt", "ethusdt", "solusdt"]
+        self.symbols = symbols or ["btcusdt", "ethusdt", "solusdt", "paxgusdt"]
         self.alert_threshold = alert_threshold_pct
         self.update_interval = update_interval_min * 60  # Convert to seconds
         self.ws = BinanceWebSocket()

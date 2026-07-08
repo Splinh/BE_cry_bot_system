@@ -26,6 +26,11 @@ class TradeEngine:
     DATA_FILE = "data/paper_trading.json"
     INITIAL_BALANCE = 10000.0  # 10k USDT
 
+    # OKX Simulation Constants
+    OKX_FUTURES_TAKER_FEE = 0.0005  # 0.05%
+    OKX_SPOT_TAKER_FEE = 0.0010     # 0.10%
+    OKX_MMR = 0.004                 # 0.4% Maintenance Margin Ratio
+
     def __init__(self):
         self.balance: float = self.INITIAL_BALANCE
         self.positions: dict = {}  # key: signal_key, value: dict
@@ -296,15 +301,17 @@ class TradeEngine:
 
             # Kiem tra LIQUIDATION
             if leverage > 1 and entry > 0:
+                liq = pos.get("liq_price")
+                if not liq:
+                    liq = entry * (1 - 1 / leverage + self.OKX_MMR) if direction == "LONG" else entry * (1 + 1 / leverage - self.OKX_MMR)
+                
                 if direction == "LONG":
-                    liq = entry * (1 - 1 / leverage)
                     if current_price <= liq:
                         result = self.close_position(sig_key, current_price, reason="LIQUIDATED")
                         if result:
                             closed_trades.append({"key": sig_key, "reason": "LIQUIDATED", "price": current_price, "pnl": result.get("pnl", 0)})
                         continue
                 else:
-                    liq = entry * (1 + 1 / leverage)
                     if current_price >= liq:
                         result = self.close_position(sig_key, current_price, reason="LIQUIDATED")
                         if result:
@@ -479,6 +486,10 @@ class TradeEngine:
             # Binh quan gia vao (weighted average)
             avg_entry = (old_size * old_entry + usdt_size * current_price) / new_total_size
             
+            # OKX fee calculation
+            fee_rate = self.OKX_FUTURES_TAKER_FEE if leverage > 1 else self.OKX_SPOT_TAKER_FEE
+            new_open_fee = usdt_size * fee_rate
+
             # Cap nhat position
             pos["entry_price"] = avg_entry
             pos["usdt_size"] = new_total_size
@@ -486,6 +497,15 @@ class TradeEngine:
             pos["dca_count"] = pos.get("dca_count", 0) + 1
             pos["last_dca_time"] = datetime.now().isoformat()
             pos["last_dca_price"] = current_price
+            pos["fees_paid"] = round(pos.get("fees_paid", 0) + new_open_fee, 4)
+            
+            # Re-calculate Liquidation Price for DCA
+            if leverage > 1:
+                new_liq = avg_entry * (1 - 1 / leverage + self.OKX_MMR) if direction.upper() == "LONG" else avg_entry * (1 + 1 / leverage - self.OKX_MMR)
+                pos["liq_price"] = round(new_liq, 4)
+            else:
+                pos["liq_price"] = 0.0
+
             if is_live and live_order:
                 pos["live_qty"] = pos.get("live_qty", 0.0) + live_order["amount"]
                 pos["binance_order_ids"] = pos.get("binance_order_ids", []) + [live_order["order_id"]]
@@ -498,7 +518,7 @@ class TradeEngine:
                 pos["tp3"] = round(smart_levels["tp3"], 4)
             
             if not is_live:
-                self.balance -= margin_required
+                self.balance -= (margin_required + new_open_fee)
             else:
                 self.sync_binance_balance()
             
@@ -553,6 +573,15 @@ class TradeEngine:
 
         sig_key = f"MANUAL_{coin.upper()}_{direction}_{datetime.now().strftime('%H%M%S%f')}"
 
+        # OKX Simulation Calculations
+        fee_rate = self.OKX_FUTURES_TAKER_FEE if leverage > 1 else self.OKX_SPOT_TAKER_FEE
+        open_fee = usdt_size * fee_rate
+        
+        if leverage > 1:
+            liq_price = current_price * (1 - 1 / leverage + self.OKX_MMR) if direction.upper() == "LONG" else current_price * (1 + 1 / leverage - self.OKX_MMR)
+        else:
+            liq_price = 0.0
+
         pos = {
             "key": sig_key,
             "coin": coin.upper(),
@@ -577,6 +606,9 @@ class TradeEngine:
             "wallet_label": wallet_label or "",
             "dca_count": 0,
             "live": is_live,
+            "fee_rate": fee_rate,
+            "fees_paid": round(open_fee, 4),
+            "liq_price": round(liq_price, 4)
         }
 
         if is_live and live_order:
@@ -585,13 +617,12 @@ class TradeEngine:
 
         self.positions[sig_key] = pos
         if not is_live:
-            self.balance -= margin_required
+            self.balance -= (margin_required + open_fee)
         else:
             self.sync_binance_balance()
 
         self._save_data()
 
-        liq_price = current_price * (1 - 1/leverage) if direction == "LONG" else current_price * (1 + 1/leverage)
         logger.success(
             f"MANUAL TRADE: {direction} {coin} x{leverage} | "
             f"Size: ${usdt_size:.2f} | Margin: ${margin_required:.2f} | "
@@ -658,6 +689,15 @@ class TradeEngine:
                 logger.error(f"Failed to place live order on Binance: {e}")
                 return None
 
+        # OKX Simulation Calculations
+        fee_rate = self.OKX_FUTURES_TAKER_FEE if leverage > 1 else self.OKX_SPOT_TAKER_FEE
+        open_fee = usdt_size * fee_rate
+        
+        if leverage > 1:
+            liq_price = entry * (1 - 1 / leverage + self.OKX_MMR) if direction.upper() == "LONG" else entry * (1 + 1 / leverage - self.OKX_MMR)
+        else:
+            liq_price = 0.0
+
         pos = {
             "key": sig_key,
             "coin": signal.get("coin", ""),
@@ -677,7 +717,10 @@ class TradeEngine:
             "pnl": 0.0,
             "status": "OPEN",  # OPEN, PARTIAL, CLOSED
             "closed_pct": 0.0,  # Phan tram da chot loi
-            "live": is_live
+            "live": is_live,
+            "fee_rate": fee_rate,
+            "fees_paid": round(open_fee, 4),
+            "liq_price": round(liq_price, 4)
         }
 
         if is_live and live_order:
@@ -686,9 +729,9 @@ class TradeEngine:
 
         self.positions[sig_key] = pos
         
-        # Tru so du (Gia lap ky quy - Margin)
+        # Tru so du (Gia lap ky quy - Margin + Phí mở)
         if not is_live:
-            self.balance -= margin_required
+            self.balance -= (margin_required + open_fee)
         else:
             self.sync_binance_balance()
         self._save_data()
@@ -738,12 +781,15 @@ class TradeEngine:
         if is_live:
             self.sync_binance_balance()
         else:
-            self.balance += (closed_margin + pnl)
+            fee_rate = pos.get("fee_rate", self.OKX_FUTURES_TAKER_FEE if leverage > 1 else self.OKX_SPOT_TAKER_FEE)
+            close_fee = closed_size * fee_rate
+            self.balance += (closed_margin + pnl - close_fee)
+            pos["fees_paid"] = round(pos.get("fees_paid", 0.0) + close_fee, 4)
 
         pos["closed_pct"] += pct_to_close
         pos["pnl"] += pnl
         
-        logger.info(f"TRADE CHOT 1 PHAN ({pct_to_close*100}%): {sig_key} | Gia chot: {close_price} | PnL tang: ${pnl:.2f} | Live: {is_live}")
+        logger.info(f"TRADE CHOT 1 PHAN ({pct_to_close*100}%): {sig_key} | Gia chot: {close_price} | PnL tang: ${pnl:.2f} | Fees tang: ${close_fee if not is_live else 0:.4f} | Live: {is_live}")
 
         # Neu da chot het => Chuyen sang Close hoan toan
         if pos["closed_pct"] >= 0.99:
@@ -790,7 +836,10 @@ class TradeEngine:
         if is_live:
             self.sync_binance_balance()
         else:
-            self.balance += (rem_margin + pnl)
+            fee_rate = pos.get("fee_rate", self.OKX_FUTURES_TAKER_FEE if leverage > 1 else self.OKX_SPOT_TAKER_FEE)
+            close_fee = rem_size * fee_rate
+            self.balance += (rem_margin + pnl - close_fee)
+            pos["fees_paid"] = round(pos.get("fees_paid", 0.0) + close_fee, 4)
 
         pos["status"] = "CLOSED"
         pos["close_time"] = datetime.now().isoformat()
@@ -799,7 +848,7 @@ class TradeEngine:
         pos["pnl"] += pnl
         pos["_closed_at"] = datetime.now().isoformat()
 
-        logger.info(f"TRADE DONG LENH: {sig_key} | Ly do: {reason} | PnL phan cuoi: ${pnl:.2f} | Tong PnL: ${pos['pnl']:.2f} | Live: {is_live}")
+        logger.info(f"TRADE DONG LENH: {sig_key} | Ly do: {reason} | PnL phan cuoi: ${pnl:.2f} | Fees phan cuoi: ${close_fee if not is_live else 0:.4f} | Tong PnL: ${pos['pnl']:.2f} | Live: {is_live}")
 
         # Dua vao history
         self.history.append(dict(pos))

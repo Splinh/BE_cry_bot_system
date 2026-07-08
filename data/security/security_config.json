@@ -1,7 +1,8 @@
 {
   "whitelist_enabled": true,
   "whitelist_ids": [
-    8023393059
+    8023393059,
+    -5364275079
   ],
   "admin_ids": [
     8023393059

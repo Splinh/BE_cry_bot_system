@@ -18,19 +18,33 @@ class TelegramNotifier:
     def __init__(self):
         self.bot = Bot(token=Config.TELEGRAM_BOT_TOKEN)
         self.chat_id = Config.TELEGRAM_CHAT_ID
+        self.group_chat_id = Config.TELEGRAM_GROUP_CHAT_ID
 
-    async def send_message(self, text: str, parse_mode: str = ParseMode.HTML, chat_id: int = None):
-        """Gửi tin nhắn text về Telegram."""
-        target = chat_id or self.chat_id
-        try:
-            await self.bot.send_message(
-                chat_id=target,
-                text=text,
-                parse_mode=parse_mode,
-            )
-            logger.info(f"📨 Đã gửi tin nhắn Telegram: {text[:50]}...")
-        except Exception as e:
-            logger.error(f"❌ Lỗi gửi Telegram: {e}")
+    async def send_message(self, text: str, parse_mode: str = ParseMode.HTML, chat_id = None):
+        """Gửi tin nhắn về Telegram (hỗ trợ gửi nhiều đích nếu không chỉ định chat_id cụ thể)."""
+        targets = []
+        if chat_id:
+            targets.append(chat_id)
+        else:
+            if self.chat_id:
+                targets.append(self.chat_id)
+            if self.group_chat_id:
+                targets.append(self.group_chat_id)
+
+        if not targets:
+            logger.debug("TelegramNotifier không có chat_id đích nào để gửi.")
+            return
+
+        for target in targets:
+            try:
+                await self.bot.send_message(
+                    chat_id=target,
+                    text=text,
+                    parse_mode=parse_mode,
+                )
+                logger.info(f"📨 Đã gửi tin nhắn Telegram tới {target}: {text[:50]}...")
+            except Exception as e:
+                logger.error(f"❌ Lỗi gửi Telegram tới {target}: {e}")
 
     async def send_signal(
         self,

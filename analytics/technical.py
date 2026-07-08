@@ -106,9 +106,9 @@ class TechnicalAnalyzer:
         # Bollinger Bands (20, 2)
         bb = ta.bbands(df["close"], length=20, std=2)
         if bb is not None:
-            df["bb_upper"] = bb.iloc[:, 0]
+            df["bb_upper"] = bb.iloc[:, 2]
             df["bb_mid"] = bb.iloc[:, 1]
-            df["bb_lower"] = bb.iloc[:, 2]
+            df["bb_lower"] = bb.iloc[:, 0]
 
         # Volume trung binh 20 ky
         df["vol_avg20"] = df["volume"].rolling(window=20).mean()
@@ -214,6 +214,34 @@ class TechnicalAnalyzer:
             macro_mult = 1.6  # Mo rong SL 60% truoc FOMC/CPI
 
         atr_distance = atr * atr_mult * macro_mult
+
+        # === CALCULATE IDEAL SL & RECOMMENDED LEVERAGE ===
+        # Gia su khong co don bay (leverage = 1) thi dung atr_mult mac dinh la 1.5 - 2.0
+        ideal_atr_mult = 1.5
+        ideal_atr_distance = atr * ideal_atr_mult * macro_mult
+        ideal_min_sl_distance = max(atr * 0.7, price * 0.015)  # min 1.5% stop loss
+        ideal_distance = max(ideal_atr_distance, ideal_min_sl_distance)
+        ideal_sl_pct = ideal_distance / price
+
+        # Don bay khuyen nghi (Liquidation o khoang 0.8/leverage -> leverage = 0.8 / sl_pct)
+        rec_lev_raw = 0.8 / ideal_sl_pct if ideal_sl_pct > 0 else 1
+        
+        # Anh xa ve cac moc don bay pho bien
+        standard_levs = [125, 100, 75, 50, 40, 30, 25, 20, 15, 10, 5, 3, 2, 1]
+        rec_lev = 1
+        for lev_opt in standard_levs:
+            if rec_lev_raw >= lev_opt:
+                rec_lev = lev_opt
+                break
+
+        # Canh bao neu don bay nguoi dung chon qua cao so voi khuyen nghi
+        leverage_warning = None
+        if leverage > rec_lev:
+            leverage_warning = (
+                f"Đòn bẩy x{leverage} quá cao so với biến động tự nhiên của thị trường ({ideal_sl_pct * 100:.2f}%). "
+                f"Cắt lỗ bị ép quá ngắn để tránh cháy tài khoản, rất dễ bị quét. "
+                f"Khuyên dùng đòn bẩy tối đa x{rec_lev} để có khoảng cắt lỗ kỹ thuật an toàn."
+            )
 
         # === MINIMUM DISTANCE GUARD (leverage-aware) ===
         # Leverage cao can nhieu room hon de tranh bi quet SL trong vai phut
@@ -379,10 +407,10 @@ class TechnicalAnalyzer:
         rr_ratio = tp1_pct / sl_pct if sl_pct > 0 else 0
 
         return {
-            "sl": round(sl, 6),
-            "tp1": round(tp1, 6),
-            "tp2": round(tp2, 6),
-            "tp3": round(tp3, 6),
+            "sl": self._round_price(sl, price),
+            "tp1": self._round_price(tp1, price),
+            "tp2": self._round_price(tp2, price),
+            "tp3": self._round_price(tp3, price),
             "atr": round(atr, 6),
             "atr_distance": round(atr_distance, 6),
             "sl_pct": round(sl_pct * 100, 3),
@@ -390,15 +418,18 @@ class TechnicalAnalyzer:
             "rr_ratio": round(rr_ratio, 2),
             "potential_roi": round(tp1_pct * leverage * 100, 1),
             "max_loss": round(sl_pct * leverage * 100, 1),
-            "liq_price": round(liq_price, 2) if liq_price > 0 else None,
-            "support": round(support1, 6),
-            "resistance": round(resistance1, 6),
-            "support2": round(support2, 6),
-            "resistance2": round(resistance2, 6),
+            "liq_price": self._round_price(liq_price, price) if liq_price > 0 else None,
+            "support": self._round_price(support1, price),
+            "resistance": self._round_price(resistance1, price),
+            "support2": self._round_price(support2, price),
+            "resistance2": self._round_price(resistance2, price),
             "method": "ATR+S/R+Fib",
             "method_detail": " | ".join(method_parts),
             "macro_risk": macro_risk,
             "leverage": leverage,
+            "recommended_leverage": rec_lev,
+            "ideal_sl_pct": round(ideal_sl_pct * 100, 3),
+            "leverage_warning": leverage_warning,
         }
 
     def compute_limit_entries(
@@ -592,6 +623,8 @@ class TechnicalAnalyzer:
                     })
 
         # Sap xep theo score giam dan
+        for entry in entries:
+            entry["entry_price"] = self._round_price(entry["entry_price"], price)
         entries.sort(key=lambda x: x["score"], reverse=True)
         return entries[:8]  # Top 8 muc gia tot nhat
 
@@ -607,6 +640,26 @@ class TechnicalAnalyzer:
             return f
         except (ValueError, TypeError):
             return fallback
+
+    @staticmethod
+    def _round_price(value, coin_price) -> float:
+        """Lam tron gia theo do lon cua coin_price de phu hop voi precision cua san."""
+        if value is None or pd.isna(value):
+            return value
+        try:
+            import math
+            p = abs(float(coin_price))
+            if p >= 10000:
+                dec = 1
+            elif p >= 10:
+                dec = 2
+            elif p >= 1:
+                dec = 3
+            else:
+                dec = min(8, max(4, -math.floor(math.log10(p)) + 4))
+            return round(float(value), dec)
+        except:
+            return value
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = "BTC/USDT") -> Optional[dict]:
         """
@@ -709,11 +762,11 @@ class TechnicalAnalyzer:
         fib_618 = latest.get("fib_618")
         fib_382 = latest.get("fib_382")
         if fib_618 is not None and pd.notna(fib_618):
-            if abs(price - fib_618) / price < 0.01:  # Gan muc Fib 61.8%
+            if abs(price - fib_618) / price < 0.003:  # Gan muc Fib 61.8% (0.3%)
                 bull_score += 1
                 reasons.append("Gia tai Fibonacci 61.8% (ho tro manh)")
         if fib_382 is not None and pd.notna(fib_382):
-            if abs(price - fib_382) / price < 0.01:  # Gan muc Fib 38.2%
+            if abs(price - fib_382) / price < 0.003:  # Gan muc Fib 38.2% (0.3%)
                 bear_score += 1
                 reasons.append("Gia tai Fibonacci 38.2% (khang cu)")
 

@@ -16,8 +16,8 @@ import re
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
-from telegram import Update, BotCommand
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from loguru import logger
 
 from core.config import Config
@@ -36,6 +36,7 @@ from analytics.cex_airdrop import CexAirdropScanner
 from core.security import SecurityManager
 from execution.trade_engine import TradeEngine
 from data.database import db as _db
+from api.gamefi import scan_gamefi_tokens
 
 from airdrop.social.telegram_worker import TelegramManager
 from airdrop.social.twitter_worker import TwitterManager
@@ -56,18 +57,26 @@ from functools import wraps
 def requires_whitelist(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        if not update.effective_chat or not update.message:
+        if not update.effective_chat:
             return
+        
+        is_callback = update.callback_query is not None
+        if not is_callback and not update.message:
+            return
+            
         chat_id = update.effective_chat.id
         
-        # Cho phép lệnh /start và /register chạy không cần whitelist
+        # Cho phieu lenh /start va /register chay khong can whitelist
         if func.__name__ in ("cmd_start", "cmd_register"):
             return await func(update, context, *args, **kwargs)
             
         action = func.__name__.replace("cmd_", "")
         access = security.check_access(chat_id, action)
         if not access["allowed"]:
-            await update.message.reply_text(f"🛡️ {access['reason']}", parse_mode="HTML")
+            if is_callback:
+                await update.callback_query.answer(text=f"🛡️ {access['reason']}", show_alert=True)
+            else:
+                await update.message.reply_text(f"🛡️ {access['reason']}", parse_mode="HTML")
             return
             
         return await func(update, context, *args, **kwargs)
@@ -224,12 +233,28 @@ system_status = {
 
 async def analyze_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xu ly khi user go ten token (VD: BTC, ETH, SOL)."""
-    text = update.message.text.strip().upper()
+    if not update.message or not update.message.text:
+        return
+
+    raw_text = update.message.text.strip()
+    chat = update.effective_chat
+    is_group = chat.type in ("group", "supergroup") if chat else False
+    
+    if is_group:
+        bot_username = context.bot.username
+        if f"@{bot_username}" not in raw_text:
+            return
+        text = raw_text.replace(f"@{bot_username}", "").strip().upper()
+    else:
+        text = raw_text.upper()
 
     # Loc ky tu, chi giu lai chu cai
     token = re.sub(r'[^A-Z0-9]', '', text)
     if not token or len(token) > 10:
         return  # Bo qua tin nhan khong hop le
+
+    if token in ("GOLD", "XAU"):
+        token = "PAXG"
 
     symbol = f"{token}/USDT"
     symbol_raw = f"{token}USDT"
@@ -473,26 +498,64 @@ async def analyze_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lenh /start - Chao mung."""
+    is_callback = update.callback_query is not None
+    reply_target = update.callback_query.message if is_callback else update.message
+
+    chat_id = update.effective_chat.id
+    chat_type = update.effective_chat.type
+    
+    chat_info = f"Chat ID: <code>{chat_id}</code> ({chat_type})"
+    
     msg = (
-        "<b>CRYPTO BOT SYSTEM</b>\n"
-        "=" * 30 + "\n\n"
-        "Chao ban! Toi la bot phan tich crypto.\n\n"
-        "<b>PHAN TICH:</b>\n"
-        "  Go ten token (VD: <code>BTC</code>) -> Bao cao tong hop\n"
-        "  <code>/spot BTC</code> -> Tin hieu MUA (dai han)\n"
-        "  <code>/futures ETH</code> -> Tin hieu Long/Short\n\n"
-        "<b>THEO DOI:</b>\n"
-        "  /signals - Xem tin hieu dang theo doi\n\n"
-        "<b>TIN TUC:</b>\n"
-        "  /scan - Quet nhanh BTC, ETH, SOL\n"
-        "  /news - Tin tuc nong nhat\n\n"
-        "<b>AIRDROP:</b>\n"
-        "  /wallet - Tao vi | /wallets - Xem vi\n"
-        "  /balance - So du | /networks - Mang\n"
-        "  /farm - Farming | /claim - Claim\n"
-        "  /menu - Hien thi menu\n"
+        "🤖 <b>CRYPTO BOT SYSTEM</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Chào mừng bạn đến với Crypto Bot! Hệ thống cung cấp tín hiệu giao dịch, quản lý ví, quét GEM và tin tức crypto.\n\n"
+        f"📍 <b>Thông tin chat hiện tại:</b>\n"
+        f"  ◽ {chat_info}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "👇 Chọn một chức năng nhanh dưới đây để bắt đầu:"
     )
-    await update.message.reply_text(msg, parse_mode="HTML")
+
+    if chat_type == "private":
+        reply_keyboard = [
+            ["📊 Quét Coins", "📈 Ví Giả Lập"],
+            ["💼 Quản Lý Ví", "🛡️ Bảo Mật"],
+            ["📰 Tin Tức", "📡 Tín Hiệu Active"],
+            ["🔔 Cảnh Báo", "📖 Hướng Dẫn"],
+            ["🤖 Menu Chính"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
+    else:
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Quét Top Coins", callback_data="menu_scan"),
+                InlineKeyboardButton("📈 Ví Giả Lập", callback_data="menu_paper"),
+            ],
+            [
+                InlineKeyboardButton("💼 Quản Lý Ví", callback_data="menu_wallets"),
+                InlineKeyboardButton("🛡️ Bảo Mật", callback_data="menu_security"),
+            ],
+            [
+                InlineKeyboardButton("📰 Tin Tức Crypto", callback_data="menu_news"),
+                InlineKeyboardButton("🔔 Cảnh Báo Giá", callback_data="menu_alerts"),
+            ],
+            [
+                InlineKeyboardButton("📡 Tín Hiệu Active", callback_data="menu_signals"),
+                InlineKeyboardButton("📖 Hướng Dẫn", callback_data="menu_help"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if is_callback:
+        await update.callback_query.answer()
+        # Callback query can only edit Inline keyboards
+        if chat_type != "private":
+            await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="HTML")
+        else:
+            # For private chat, send a new message with the reply keyboard
+            await reply_target.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await reply_target.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -500,27 +563,90 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cmd_start(update, context)
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lenh /help hoac nut Huong Dan - Huong dan su dung chi tiet."""
+    is_callback = update.callback_query is not None
+    reply_target = update.callback_query.message if is_callback else update.message
+    
+    if is_callback:
+        await update.callback_query.answer()
+
+    msg = (
+        "📖 <b>HƯỚNG DẪN CRYPTO BOT SYSTEM</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "📈 <b>1. Phân Tích & Vào Lệnh:</b>\n"
+        "◽ <b>Gõ trực tiếp tên coin:</b> (VD: <code>BTC</code>) để xem xu hướng kỹ thuật, điểm entry/SL/TP và tin tức.\n"
+        "◽ <code>/spot [coin]</code>: Lấy tín hiệu Mua Spot dài hạn.\n"
+        "◽ <code>/futures [coin]</code>: Lấy tín hiệu Long/Short đòn bẩy ngắn hạn.\n"
+        "◽ <code>/signals</code>: Xem danh sách lệnh đang được Bot giám sát.\n\n"
+        "🚨 <b>2. Cảnh Báo Giá (Price Alerts):</b>\n"
+        "◽ <code>/alert [coin] [giá] [above/below]</code>: Cài cảnh báo giá.\n"
+        "◽ Ví dụ: <code>/alert BTC 68000 above</code>\n"
+        "◽ <code>/alerts</code>: Xem các cảnh báo giá đang chạy.\n\n"
+        "💼 <b>3. Tài Khoản Giả Lập & Auto Trade:</b>\n"
+        "◽ <code>/paper</code>: Xem số dư ảo, Win Rate, và PnL trạng thái hiện tại.\n"
+        "◽ <code>/autotrade on/off</code>: Bật/Tắt chế độ tự động vào lệnh theo tín hiệu kỹ thuật.\n"
+        "◽ <code>/trailsl [coin] on/off</code>: Bật/Tắt Trailing Stop Loss.\n\n"
+        "💎 <b>4. Quét Gem & Airdrop:</b>\n"
+        "◽ <code>/gem [solana/base]</code>: Quét token mới nổi bật trên DEX.\n"
+        "◽ <code>/wallet [số lượng]</code>: Tạo ví EVM mới cày volume.\n"
+        "◽ <code>/wallets</code>: Xem danh sách ví & số dư.\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>Mẹo: Sử dụng phím nhấn nhanh ở góc dưới để thao tác cực nhanh!</i>"
+    )
+
+    keyboard = [[InlineKeyboardButton("🔙 Quay lại Menu Chính", callback_data="menu_start")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await reply_target.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
+
+
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lenh /scan - Quet nhanh top coins."""
-    await update.message.reply_text("Dang quet BTC, ETH, SOL... cho 15-20 giay")
+    """Lenh /scan - Quet nhanh top coins (Song song)."""
+    is_callback = update.callback_query is not None
+    reply_target = update.callback_query.message if is_callback else update.message
+    
+    if is_callback:
+        await update.callback_query.answer()
+
+    await reply_target.reply_text("Dang quet BTC, ETH, SOL... cho 1-2 giay")
 
     analyzer = TechnicalAnalyzer()
     ws = BinanceWebSocket()
 
     try:
         coins = [("BTC", "btcusdt"), ("ETH", "ethusdt"), ("SOL", "solusdt")]
-        lines = ["<b>QUET NHANH TOP COINS (H1)</b>", "=" * 30, ""]
-
+        
+        # Build danh sach task chay song song
+        tasks = []
         for name, raw in coins:
-            # Gia real-time
-            pdata = await ws.get_price_once(raw)
-            price = pdata["price"] if pdata else 0
-            change = pdata.get("change_pct", 0) if pdata else 0
+            tasks.append(ws.get_price_once(raw))
+            tasks.append(analyzer.analyze(f"{name}/USDT", "1h"))
+            
+        # Kich hoat tat ca truy van cung luc
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        lines = ["<b>QUET NHANH TOP COINS (H1)</b>", "=" * 30, ""]
+        
+        for i, (name, raw) in enumerate(coins):
+            pdata = results[2 * i]
+            signal = results[2 * i + 1]
+            
+            # Xuly gia real-time
+            if isinstance(pdata, Exception):
+                price, change = 0.0, 0.0
+                logger.error(f"Loi lay gia song song cho {name}: {pdata}")
+            else:
+                price = pdata["price"] if pdata else 0.0
+                change = pdata.get("change_pct", 0.0) if pdata else 0.0
 
-            # TA
-            signal = await analyzer.analyze(f"{name}/USDT", "1h")
-            direction = signal.get("direction", "N/A") if signal else "N/A"
-            rsi = signal.get("rsi") if signal else None
+            # Xuly tin hieu TA
+            if isinstance(signal, Exception):
+                direction, rsi, reasons = "ERROR", None, []
+                logger.error(f"Loi phan tich song song cho {name}: {signal}")
+            else:
+                direction = signal.get("direction", "N/A") if signal else "N/A"
+                rsi = signal.get("rsi") if signal else None
+                reasons = signal.get("reasons", [])[:2] if signal else []
 
             if direction == "LONG":
                 icon = "LONG"
@@ -533,20 +659,28 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"<b>{name}:</b> <code>${price:,.2f}</code> ({change:+.2f}%)")
             lines.append(f"  {icon} {rsi_str}")
 
-            reasons = signal.get("reasons", [])[:2] if signal else []
             if reasons:
                 lines.append(f"  {html.escape(', '.join(reasons))}")
             lines.append("")
 
         lines.append("<i>Go ten token de xem chi tiet (VD: BTC)</i>")
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        
+        keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_start")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await reply_target.reply_text("\n".join(lines), reply_markup=reply_markup, parse_mode="HTML")
     finally:
         await analyzer.close()
 
 
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lenh /news - Tin tuc nong."""
-    await update.message.reply_text("Dang cao tin tuc...")
+    is_callback = update.callback_query is not None
+    reply_target = update.callback_query.message if is_callback else update.message
+    
+    if is_callback:
+        await update.callback_query.answer()
+
+    await reply_target.reply_text("Dang cao tin tuc...")
 
     crawler = NewsCrawler()
     sentiment_analyzer = SentimentAnalyzer()
@@ -581,7 +715,9 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if source:
                 lines.append(f"    <i>- {source}</i>")
 
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+        keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_start")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await reply_target.reply_text("\n".join(lines), reply_markup=reply_markup, parse_mode="HTML", disable_web_page_preview=True)
     finally:
         await crawler.close()
 
@@ -625,11 +761,19 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lenh /wallets - Xem danh sach vi."""
+    is_callback = update.callback_query is not None
+    reply_target = update.callback_query.message if is_callback else update.message
+    
+    if is_callback:
+        await update.callback_query.answer()
+
     wm = WalletManager()
     wallets = wm.list_wallets()
 
     if not wallets:
-        await update.message.reply_text("Chua co vi nao. Go /wallet de tao vi moi.")
+        keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_start")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await reply_target.reply_text("Chua co vi nao. Go /wallet de tao vi moi.", reply_markup=reply_markup)
         return
 
     summary = wm.get_summary()
@@ -644,7 +788,9 @@ async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "\u2501" * 18 + "\n"
     msg += f"Active: {summary['active_wallets']} | Tong TX: {summary['total_transactions']}"
 
-    await update.message.reply_text(msg, parse_mode="HTML")
+    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_start")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await reply_target.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -781,6 +927,8 @@ async def cmd_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _analyze_and_signal(update, token: str, signal_type: str):
     """Ham chung: phan tich va gui tin hieu Spot hoac Futures."""
+    if token in ("GOLD", "XAU"):
+        token = "PAXG"
     symbol = f"{token}/USDT"
     symbol_raw = f"{token}USDT"
 
@@ -1059,12 +1207,21 @@ async def cmd_futures(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lenh /signals - Xem cac tin hieu dang theo doi."""
+    is_callback = update.callback_query is not None
+    reply_target = update.callback_query.message if is_callback else update.message
+    
+    if is_callback:
+        await update.callback_query.answer()
+
     active = signal_tracker.list_active()
 
     if not active:
-        await update.message.reply_text(
+        keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_start")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await reply_target.reply_text(
             "\u26aa Khong co tin hieu nao dang theo doi.\n"
             "Go <code>/spot BTC</code> hoac <code>/futures ETH</code> de tao tin hieu.",
+            reply_markup=reply_markup,
             parse_mode="HTML",
         )
         return
@@ -1080,7 +1237,10 @@ async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"  Trang thai: {s['status']}\n"
 
     msg += "\n" + "\u2501" * 18
-    await update.message.reply_text(msg, parse_mode="HTML")
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_start")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await reply_target.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
 
 
 # ============================================
@@ -1457,6 +1617,157 @@ def _get_weth(chain: str) -> str:
     return weth.get(chain, weth["arbitrum"])
 
 
+async def cmd_gamefi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Lenh /gamefi - Quan ly va theo doi cac du an GameFi.
+    Cu phap:
+      /gamefi - Hien thi danh sach game dang theo doi
+      /gamefi scan - Quet top game trending tu CoinGecko
+      /gamefi add [Symbol] [Ten] [Chain] [Ghi chu] - Them game can theo doi
+      /gamefi rm [Symbol] - Xoa game khoi danh sach
+    """
+    chat_id = update.effective_chat.id
+    access = security.check_access(chat_id, "gamefi")
+    if not access["allowed"]:
+        await update.message.reply_text(f"\U0001f6e1 {access['reason']}", parse_mode="HTML")
+        return
+
+    # Check if there is an argument
+    action = context.args[0].lower() if context.args else None
+
+    if not action:
+        # List tracked games
+        projects = _db.get_gamefi_projects()
+        if not projects:
+            msg = "🎮 <b>GAMEFI TRACKER</b> 🎮\n"
+            msg += "\u2501" * 18 + "\n"
+            msg += "Chua co du an GameFi nao duoc theo doi.\n\n"
+            msg += "💡 <b>Cach dung:</b>\n"
+            msg += "• <code>/gamefi scan</code>: Quet top token game tu CoinGecko\n"
+            msg += "• <code>/gamefi add [Symbol] [Ten] [Chain] [Ghi chu]</code>: Them game moi\n"
+            msg += "• <code>/gamefi rm [Symbol]</code>: Xoa game"
+            await update.message.reply_text(msg, parse_mode="HTML")
+            return
+
+        msg = "🎮 <b>DANH SACH GAMEFI DANG THEO DOI</b> 🎮\n"
+        msg += "\u2501" * 18 + "\n"
+        for i, p in enumerate(projects, 1):
+            msg += f"\n<b>#{i} {p['symbol']}</b> - {p['name']} ({p['chain']})\n"
+            if p.get('token_price'):
+                msg += f"  \U0001f4b0 Gia token: ${p['token_price']:,.4f}\n"
+            if p.get('nft_floor_price'):
+                msg += f"  \U0001f511 NFT Floor: ${p['nft_floor_price']:,.1f}\n"
+            if p.get('daily_roi_estimate'):
+                msg += f"  \u26a1 ROI: {p['daily_roi_estimate']}%/ngay\n"
+            if p.get('onchain_users_24h'):
+                msg += f"  \U0001f465 Users 24h: {p['onchain_users_24h']:,}\n"
+            if p.get('note'):
+                msg += f"  📝 <i>{html.escape(p['note'])}</i>\n"
+        
+        msg += "\n" + "\u2501" * 18 + "\n"
+        msg += "💡 Go <code>/gamefi scan</code> de quet token moi tu CoinGecko."
+        await update.message.reply_text(msg, parse_mode="HTML")
+        return
+
+    elif action == "scan":
+        await update.message.reply_text("🎮 Dang quet token GameFi thinh hanh tu CoinGecko...")
+        try:
+            res = await scan_gamefi_tokens()
+            if not res or not res.get("success") or not res.get("tokens"):
+                await update.message.reply_text("\u274c Khong the lay du lieu GameFi tu CoinGecko luc nay.")
+                return
+
+            tokens = res["tokens"]
+            msg = "🎮 <b>TOP TRENDING GAMEFI - COINGECKO</b> 🎮\n"
+            msg += "\u2501" * 18 + "\n"
+            for i, t in enumerate(tokens[:8], 1):
+                change = t.get("price_change_24h", 0) or 0
+                msg += f"\n🔥 <b>#{i} {t['symbol']}</b> ({t['name']})\n"
+                msg += f"  \U0001f4b0 Gia: ${t['price']:.4f} ({change:+.1f}% 24h)\n"
+                msg += f"  \U0001f6e1 Rui ro: {t.get('risk_level', 'MEDIUM')} | ROI/Ngay: {t.get('daily_roi_estimate', 0)}%\n"
+                if t.get('note'):
+                    msg += f"  📝 <i>{html.escape(t['note'])}</i>\n"
+            
+            msg += "\n" + "\u2501" * 18 + "\n"
+            msg += "💡 Go <code>/gamefi add [Symbol] [Ten]</code> de theo doi game."
+            await update.message.reply_text(msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Loi scan gamefi: {e}")
+            await update.message.reply_text("\u274c Loi khi quet token GameFi.")
+
+    elif action == "add":
+        if len(context.args) < 3:
+            await update.message.reply_text(
+                "\u274c <b>Sai cu phap.</b> Cach dung:\n"
+                "<code>/gamefi add [Symbol] [Ten Game] [Chain] [Ghi chu]</code>\n"
+                "VD: <code>/gamefi add AXS \"Axie Infinity\" Ronin \"Game NFT dung Ronin\"</code>",
+                parse_mode="HTML"
+            )
+            return
+
+        symbol = context.args[1].upper()
+        name = context.args[2]
+        chain = context.args[3].upper() if len(context.args) > 3 else "SOL"
+        note = " ".join(context.args[4:]) if len(context.args) > 4 else ""
+
+        existing = _db.get_gamefi_projects()
+        if any(p["symbol"].upper() == symbol for p in existing):
+            await update.message.reply_text(f"\u274c Du an {symbol} da duoc theo doi truoc do.")
+            return
+
+        try:
+            from api.gamefi import GAMEFI_DATABASE
+            floor = 0.0
+            roi = 0.0
+            if symbol in GAMEFI_DATABASE:
+                floor = GAMEFI_DATABASE[symbol].get("floor", 0.0)
+                roi = GAMEFI_DATABASE[symbol].get("roi", 0.0)
+                if not note:
+                    note = GAMEFI_DATABASE[symbol].get("note", "")
+
+            _db.add_gamefi_project(
+                name=name,
+                symbol=symbol,
+                chain=chain,
+                token_price=0.0,
+                nft_floor_price=floor,
+                daily_roi_estimate=roi,
+                onchain_users_24h=0,
+                note=note
+            )
+            await update.message.reply_text(f"\u2705 Da them game: <b>{name} ({symbol})</b> vao danh sach theo doi.", parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Loi add gamefi: {e}")
+            await update.message.reply_text("\u274c Khong the them du an GameFi vao DB.")
+
+    elif action == "rm":
+        if len(context.args) < 2:
+            await update.message.reply_text("\u274c <b>Sai cu phap.</b> Dung: <code>/gamefi rm [Symbol]</code>", parse_mode="HTML")
+            return
+
+        symbol = context.args[1].upper()
+        existing = _db.get_gamefi_projects()
+        target = None
+        for p in existing:
+            if p["symbol"].upper() == symbol:
+                target = p
+                break
+
+        if not target:
+            await update.message.reply_text(f"\u274c Khong tim thay du an {symbol} trong danh sach theo doi.")
+            return
+
+        try:
+            _db.remove_gamefi_project(target["id"])
+            await update.message.reply_text(f"\u2705 Da xoa game: <b>{target['name']} ({symbol})</b>.", parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Loi xoa gamefi: {e}")
+            await update.message.reply_text("\u274c Khong the xoa du an GameFi.")
+
+    else:
+        await update.message.reply_text("\u274c Hanh dong khong hop le. Cac lenh ho tro: scan, add, rm")
+
+
 # ============================================
 #  LISTING COMMANDS: /listing, /monitor
 # ============================================
@@ -1537,6 +1848,12 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_security(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lenh /security - Xem trang thai bao mat."""
+    is_callback = update.callback_query is not None
+    reply_target = update.callback_query.message if is_callback else update.message
+    
+    if is_callback:
+        await update.callback_query.answer()
+
     chat_id = update.effective_chat.id
     status = security.get_security_status()
 
@@ -1564,7 +1881,9 @@ async def cmd_security(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "  /setlimit [so ETH] - Gioi han TX\n"
     msg += "  /audit - Xem nhat ky\n"
 
-    await update.message.reply_text(msg, parse_mode="HTML")
+    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_start")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await reply_target.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def cmd_setpin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1781,6 +2100,12 @@ async def cmd_autotrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xem trang thai tai khoan Paper Trading."""
+    is_callback = update.callback_query is not None
+    reply_target = update.callback_query.message if is_callback else update.message
+    
+    if is_callback:
+        await update.callback_query.answer()
+
     status = trade_engine.get_portfolio_status()
     
     msg = "\U0001f4bc <b>VÍ GIẢ LẬP (PAPER TRADING)</b>\n"
@@ -1838,9 +2163,23 @@ async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_pos_pnl = realized_pnl + unrealized_pnl
             pnl_str = f"+${total_pos_pnl:.2f}" if total_pos_pnl >= 0 else f"-${abs(total_pos_pnl):.2f}"
             
-            msg += f"  {i}. {dir_icon} <b>{coin}</b> | Size: ${size:.1f}\n"
-            msg += f"     Entry: ${entry:.4f} | Cur: ${current_price:.4f}\n"
-            msg += f"     PnL: <b>{pnl_str}</b> ({price_diff_pct*100:+.2f}%)\n"
+            leverage = pos.get("leverage", 1)
+            liq_price = pos.get("liq_price", 0.0)
+            fees_paid = pos.get("fees_paid", 0.0)
+            
+            msg += f"  {i}. {dir_icon} <b>{coin}</b>"
+            if leverage > 1:
+                msg += f" x{leverage}"
+            msg += f" | Size: ${size:.1f}\n"
+            msg += f"     Entry: ${entry:,.2f} | Cur: ${current_price:,.2f}\n"
+            if leverage > 1 and liq_price > 0:
+                msg += f"     Liq: <code>${liq_price:,.2f}</code> | "
+            else:
+                msg += "     "
+            msg += f"Phí: ${fees_paid:.2f}\n"
+            
+            roe_pct = price_diff_pct * 100 * leverage
+            msg += f"     PnL: <b>{pnl_str}</b> ({roe_pct:+.2f}% ROE)\n"
             
         # Hien thi them uoc tinh tong Balance neu dong het lenh bay gio
         est_balance = status['balance'] + unrealized_pnl_total
@@ -1849,7 +2188,9 @@ async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "\u2501" * 18 + "\n"
     msg += "Dung <code>/autotrade on|off</code> de thay doi."
     
-    await update.message.reply_text(msg, parse_mode="HTML")
+    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_start")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await reply_target.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
 
 async def cmd_trailsl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bat/tat Trailing Stop Loss cho position. VD: /trailsl BTC on"""
@@ -1865,6 +2206,8 @@ async def cmd_trailsl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     coin = context.args[0].upper()
+    if coin in ("GOLD", "XAU"):
+        coin = "PAXG"
     mode = context.args[1].lower()
 
     # Tim position chua dong cua coin nay
@@ -1909,6 +2252,8 @@ async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     coin = context.args[0].upper()
+    if coin in ("GOLD", "XAU"):
+        coin = "PAXG"
     try:
         target = float(context.args[1].replace(",", ""))
     except ValueError:
@@ -1931,23 +2276,32 @@ async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xem va xoa danh sach price alerts."""
+    is_callback = update.callback_query is not None
+    reply_target = update.callback_query.message if is_callback else update.message
+    
+    if is_callback:
+        await update.callback_query.answer()
+
     chat_id = update.effective_chat.id
 
     # Xoa alert neu co tham so ID
-    if context.args and context.args[0].lower() == "del" and len(context.args) > 1:
+    if not is_callback and context.args and context.args[0].lower() == "del" and len(context.args) > 1:
         try:
             alert_id = int(context.args[1])
             _db.delete_alert(alert_id, chat_id)
-            await update.message.reply_text(f"\U0001f5d1 Da xoa alert #{alert_id}.", parse_mode="HTML")
+            await reply_target.reply_text(f"\U0001f5d1 Da xoa alert #{alert_id}.", parse_mode="HTML")
         except ValueError:
-            await update.message.reply_text("Cu phap: <code>/alerts del [id]</code>", parse_mode="HTML")
+            await reply_target.reply_text("Cu phap: <code>/alerts del [id]</code>", parse_mode="HTML")
         return
 
     alerts = _db.get_active_alerts(chat_id)
     if not alerts:
-        await update.message.reply_text(
+        keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_start")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await reply_target.reply_text(
             "\U0001f514 Chua co price alert nao.\n"
             "Dat alert: <code>/alert BTC 100000 above</code>",
+            reply_markup=reply_markup,
             parse_mode="HTML"
         )
         return
@@ -1959,7 +2313,10 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"#{a['id']} {dir_icon} <b>{a['coin']}</b> {a['direction']} <code>${a['target_price']:,.4f}</code>\n"
     msg += "━" * 18 + "\n"
     msg += "Xoa: <code>/alerts del [id]</code>"
-    await update.message.reply_text(msg, parse_mode="HTML")
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_start")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await reply_target.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
 
 # ============================================
 #  SOCIAL AUTOMATION COMMANDS
@@ -2013,6 +2370,67 @@ async def cmd_retweet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop.run_in_executor(None, twitter_manager.raid_tweet, tweet_id)
 
 
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Router cho cac su kien click nut (Inline Keyboard)."""
+    query = update.callback_query
+    data = query.data
+    chat_id = update.effective_chat.id
+    
+    # Kiem tra quyen whitelist
+    if data not in ("menu_start", "menu_help"):
+        action = data.replace("menu_", "")
+        access = security.check_access(chat_id, action)
+        if not access["allowed"]:
+            await query.answer(text=f"🛡️ {access['reason']}", show_alert=True)
+            return
+
+    if data == "menu_start":
+        await cmd_start(update, context)
+    elif data == "menu_scan":
+        await cmd_scan(update, context)
+    elif data == "menu_paper":
+        await cmd_paper(update, context)
+    elif data == "menu_wallets":
+        await cmd_wallets(update, context)
+    elif data == "menu_security":
+        await cmd_security(update, context)
+    elif data == "menu_news":
+        await cmd_news(update, context)
+    elif data == "menu_alerts":
+        await cmd_alerts(update, context)
+    elif data == "menu_signals":
+        await cmd_signals(update, context)
+    elif data == "menu_help":
+        await cmd_help(update, context)
+    else:
+        logger.warning(f"Unknown callback query data: {data}")
+        await query.answer("Chức năng không tồn tại!")
+
+
+async def handle_menu_text_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xu ly khi nguoi dung nhan nut tren Persistent Keyboard."""
+    text = update.message.text.strip()
+    
+    if "📊 Quét Coins" in text:
+        await cmd_scan(update, context)
+    elif "📈 Ví Giả Lập" in text:
+        await cmd_paper(update, context)
+    elif "💼 Quản Lý Ví" in text:
+        await cmd_wallets(update, context)
+    elif "🛡️ Bảo Mật" in text:
+        await cmd_security(update, context)
+    elif "📰 Tin Tức" in text:
+        await cmd_news(update, context)
+    elif "📡 Tín Hiệu Active" in text:
+        await cmd_signals(update, context)
+    elif "🔔 Cảnh Báo" in text:
+        await cmd_alerts(update, context)
+    elif "📖 Hướng Dẫn" in text:
+        await cmd_help(update, context)
+    elif "🤖 Menu Chính" in text:
+        await cmd_start(update, context)
+
+
 #  MAIN - KHOI DONG BOT
 # ============================================
 
@@ -2027,6 +2445,9 @@ def main():
 
     # Tao ung dung
     app = Application.builder().token(token).build()
+
+    # Dang ky CallbackQuery Handler
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
 
     # Dang ky lenh (Không cần check whitelist)
     app.add_handler(CommandHandler("start", cmd_start))
@@ -2065,6 +2486,7 @@ def main():
     app.add_handler(CommandHandler("newtoken", requires_whitelist(cmd_newtoken)))
     app.add_handler(CommandHandler("check", requires_whitelist(cmd_check)))
     app.add_handler(CommandHandler("buy", requires_whitelist(cmd_buy)))
+    app.add_handler(CommandHandler("gamefi", requires_whitelist(cmd_gamefi)))
 
     # Social Automation
     app.add_handler(CommandHandler("social", requires_whitelist(cmd_social)))
@@ -2083,6 +2505,12 @@ def main():
     app.add_handler(CommandHandler("whitelist", requires_whitelist(cmd_whitelist)))
     app.add_handler(CommandHandler("setlimit", requires_whitelist(cmd_setlimit)))
     app.add_handler(CommandHandler("audit", requires_whitelist(cmd_audit)))
+
+    app.add_handler(CommandHandler("help", cmd_help))
+
+    # Bat ky tin nhan text nao trung khop nut bam -> dieu huong
+    menu_filter = filters.Regex("^(📊 Quét Coins|📈 Ví Giả Lập|💼 Quản Lý Ví|🛡️ Bảo Mật|📰 Tin Tức|📡 Tín Hiệu Active|🔔 Cảnh Báo|📖 Hướng Dẫn|🤖 Menu Chính)$")
+    app.add_handler(MessageHandler(menu_filter, requires_whitelist(handle_menu_text_button)))
 
     # Bat ky tin nhan text nao -> phan tich token
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, requires_whitelist(analyze_token)))
@@ -2113,6 +2541,15 @@ def main():
         from utils.report_scheduler import start_report_scheduler
         report_task = asyncio.create_task(start_report_scheduler())
         
+        # Khoi dong Realtime Signal Scanner (quet moi 5 phut)
+        try:
+            from analytics.signal_scanner import SignalScanner
+            global signal_scanner_service
+            signal_scanner_service = SignalScanner(interval_seconds=300)
+            signal_scanner_service.start()
+        except Exception as e:
+            logger.error(f"Khong the khoi dong Signal Scanner: {e}")
+
         # Khoi dong Telegram Bot task
         await app.initialize()
         await app.start()

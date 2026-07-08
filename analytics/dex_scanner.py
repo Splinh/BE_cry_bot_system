@@ -4,6 +4,7 @@ Su dung DexScreener API (free, khong can API key).
 """
 import asyncio
 import aiohttp
+from aiohttp.resolver import ThreadedResolver
 from datetime import datetime, timedelta
 from typing import Optional
 from loguru import logger
@@ -50,9 +51,11 @@ class DexGemScanner:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if not self.session or self.session.closed:
+            connector = aiohttp.TCPConnector(resolver=ThreadedResolver())
             self.session = aiohttp.ClientSession(
+                connector=connector,
                 timeout=aiohttp.ClientTimeout(total=15),
-                headers={"User-Agent": "CryptoBotSystem/1.0"},
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
             )
         return self.session
 

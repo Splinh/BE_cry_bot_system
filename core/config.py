@@ -19,6 +19,17 @@ class Config:
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    TELEGRAM_GROUP_CHAT_ID: str = os.getenv("TELEGRAM_GROUP_CHAT_ID", "")
+
+    # --- Zalo Bot ---
+    ZALO_BOT_TOKEN: str = os.getenv("ZALO_BOT_TOKEN", "")
+    ZALO_ADMIN_CHAT_ID: str = os.getenv("ZALO_ADMIN_CHAT_ID", "")
+    ZALO_GROUP_CHAT_ID: str = os.getenv("ZALO_GROUP_CHAT_ID", "")
+
+    # Để tương thích ngược nếu có phần code cũ tham chiếu:
+    ZALO_ACCESS_TOKEN: str = os.getenv("ZALO_ACCESS_TOKEN", os.getenv("ZALO_BOT_TOKEN", ""))
+    ZALO_USER_ID: str = os.getenv("ZALO_USER_ID", os.getenv("ZALO_ADMIN_CHAT_ID", ""))
+
 
     # --- Binance ---
     BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
