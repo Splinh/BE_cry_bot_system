@@ -24,8 +24,8 @@ pandas-ta>=0.3.14b1         # Chỉ báo kỹ thuật (RSI, MACD, EMA, Bollinger
 numpy>=1.24.0               # Tính toán số học
 
 # --- Web3 / Blockchain (Phase 4+) ---
-# web3>=6.0.0               # Tương tác Blockchain EVM
-# eth-account>=0.9.0        # Quản lý ví Ethereum
+web3>=6.0.0               # Tương tác Blockchain EVM
+eth-account>=0.9.0        # Quản lý ví Ethereum
 
 # --- Automation (Phase 5+) ---
 # playwright>=1.40.0        # Giả lập trình duyệt (Airdrop social tasks)
