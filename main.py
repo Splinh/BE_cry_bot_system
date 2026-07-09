@@ -2116,12 +2116,69 @@ async def cmd_trendfilter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Sai cu phap. Dung <code>/trendfilter on</code> hoac <code>/trendfilter off</code>.", parse_mode="HTML")
 
 async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Xem trang thai tai khoan Paper Trading."""
+    """Xem trang thai, reset hoac bao cao tai khoan Paper Trading."""
     is_callback = update.callback_query is not None
     reply_target = update.callback_query.message if is_callback else update.message
     
     if is_callback:
         await update.callback_query.answer()
+
+    if context.args:
+        action = context.args[0].lower()
+        if action == "reset":
+            amount = 10000.0
+            if len(context.args) > 1:
+                try:
+                    amount = float(context.args[1])
+                except ValueError:
+                    await reply_target.reply_text("Số tiền reset không hợp lệ. Vui lòng nhập số (VD: /paper reset 5000)")
+                    return
+            trade_engine.reset_portfolio(amount)
+            await reply_target.reply_text(f"🟢 <b>ĐÃ RESET VÍ GIẢ LẬP</b>\nSố dư mới: <b>${amount:,.2f} USDT</b>\nLịch sử giao dịch và số dư cũ đã được xóa sạch. Bắt đầu chu kỳ test mới!", parse_mode="HTML")
+            return
+        elif action == "set":
+            if len(context.args) < 2:
+                await reply_target.reply_text("Vui lòng nhập số tiền cần set (VD: /paper set 5000)")
+                return
+            try:
+                amount = float(context.args[1])
+            except ValueError:
+                await reply_target.reply_text("Số tiền không hợp lệ. Vui lòng nhập số.")
+                return
+            trade_engine.balance = amount
+            trade_engine._save_data()
+            await reply_target.reply_text(f"🟢 Đã đặt số dư ví giả lập thành: <b>${amount:,.2f} USDT</b>", parse_mode="HTML")
+            return
+        elif action == "report":
+            report = trade_engine.generate_profit_report()
+            
+            pnl_icon = "📈" if report["net_pnl"] >= 0 else "📉"
+            msg = "📊 <b>BÁO CÁO HIỆU SUẤT VÍ GIẢ LẬP</b>\n"
+            msg += "━━━━━━━━━━━━━━━━━━\n"
+            msg += f"⏱️ <b>Thời gian chạy:</b> {report['days_elapsed']} ngày\n"
+            msg += f"💵 <b>Vốn bắt đầu:</b> ${report['initial_balance']:,.2f} USDT\n"
+            msg += f"💰 <b>Số dư hiện tại:</b> ${report['current_balance']:,.2f} USDT\n"
+            msg += f"{pnl_icon} <b>Lợi nhuận ròng:</b> {report['net_pnl']:+,.2f} USDT (<b>{report['roi_pct']:+,.2f}%</b>)\n\n"
+            
+            msg += f"📊 <b>Tổng số lệnh:</b> {report['total_trades']}\n"
+            msg += f"🎯 <b>Win Rate:</b> {report['win_rate']:.1f}%\n"
+            msg += f"🏆 <b>Thắng lớn nhất:</b> ${report['largest_win']:,.2f} USDT\n"
+            msg += f"💀 <b>Thua lớn nhất:</b> ${report['largest_loss']:,.2f} USDT\n\n"
+            
+            msg += f"👉 <b>Theo vị thế:</b>\n"
+            msg += f" - LONG: {report['long_stats']['count']} lệnh (Win Rate: {report['long_stats']['win_rate']}%)\n"
+            msg += f" - SHORT: {report['short_stats']['count']} lệnh (Win Rate: {report['short_stats']['win_rate']}%)\n\n"
+            
+            msg += f"🪙 <b>Thống kê theo Coin:</b>\n"
+            if report["coin_breakdown"]:
+                for c in report["coin_breakdown"]:
+                    c_pnl_icon = "🟢" if c["pnl"] >= 0 else "🔴"
+                    msg += f" - {c['coin']}: {c['total_trades']} lệnh | PnL: {c['pnl']:+,.2f} USDT | Win Rate: {c['win_rate']}%\n"
+            else:
+                msg += " - Chưa có lịch sử giao dịch coin nào.\n"
+            msg += "━━━━━━━━━━━━━━━━━━"
+            await reply_target.reply_text(msg, parse_mode="HTML")
+            return
 
     status = trade_engine.get_portfolio_status()
     

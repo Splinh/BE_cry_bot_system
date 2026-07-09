@@ -38,6 +38,8 @@ class TradeEngine:
         self.balance_history: list = []  # Lich su nap/rut
         self.auto_trade_enabled: bool = False
         self.last_sync: str = ""
+        self.test_start_time: str = ""
+        self.test_start_balance: float = self.INITIAL_BALANCE
 
         # === Risk management: hard caps tu Config (don vi PCT theo balance + USD tuyet doi) ===
         self.risk_per_trade: float = Config.RISK_PER_TRADE
@@ -71,6 +73,8 @@ class TradeEngine:
                     self.daily_date = data.get("daily_date", "")
                     self.daily_realized_pnl = data.get("daily_realized_pnl", 0.0)
                     self.daily_start_balance = data.get("daily_start_balance", 0.0)
+                    self.test_start_time = data.get("test_start_time", "")
+                    self.test_start_balance = data.get("test_start_balance", self.balance)
             except Exception as e:
                 logger.error(f"Loi doc file paper trading: {e}")
         else:
@@ -90,6 +94,8 @@ class TradeEngine:
                     "daily_date": self.daily_date,
                     "daily_realized_pnl": self.daily_realized_pnl,
                     "daily_start_balance": self.daily_start_balance,
+                    "test_start_time": self.test_start_time,
+                    "test_start_balance": self.test_start_balance,
                     "last_sync": datetime.now().isoformat()
                 }, f, indent=4)
         except Exception as e:
@@ -1011,4 +1017,143 @@ class TradeEngine:
             "win_rate": winrate,
             "total_pnl": total_pnl,
             "auto_trade": self.auto_trade_enabled
+        }
+
+    def reset_portfolio(self, initial_balance: float = None):
+        """Xóa sạch lịch sử giao dịch và số dư để bắt đầu một chu kỳ test mới."""
+        if initial_balance is None:
+            initial_balance = self.INITIAL_BALANCE
+            
+        self.balance = initial_balance
+        self.positions = {}
+        self.history = []
+        self.balance_history = []
+        self.daily_realized_pnl = 0.0
+        self.daily_start_balance = initial_balance
+        self.test_start_time = datetime.now().isoformat()
+        self.test_start_balance = initial_balance
+        
+        # Lưu dữ liệu local
+        self._save_data()
+        
+        # Xóa trong SQLite
+        if sqlite_db:
+            try:
+                conn = sqlite_db._get_conn()
+                with conn:
+                    conn.execute("DELETE FROM positions")
+                    conn.execute("DELETE FROM balance_history")
+                sqlite_db.update_balance(self.balance, self.auto_trade_enabled)
+                sqlite_db.add_balance_record("DEP", self.balance, self.balance, f"Khởi tạo chu kỳ test mới với số vốn ${self.balance:,.2f}")
+                logger.info("Database reset successfully for paper trading.")
+            except Exception as e:
+                logger.error(f"Error resetting database: {e}")
+
+    def generate_profit_report(self) -> dict:
+        """Tạo báo cáo lợi nhuận chi tiết cho chu kỳ test."""
+        # Đọc lịch sử giao dịch từ SQLite hoặc local history
+        if sqlite_db:
+            try:
+                closed_trades = sqlite_db.get_closed_positions(limit=1000)
+            except Exception as e:
+                logger.error(f"Error fetching closed trades: {e}")
+                closed_trades = self.history
+        else:
+            closed_trades = self.history
+            
+        total_trades = len(closed_trades)
+        
+        # Phân tích theo đồng coin (BTC, ETH, SOL)
+        coin_stats = {}
+        wins = 0
+        total_pnl = 0.0
+        largest_win = 0.0
+        largest_loss = 0.0
+        
+        long_wins = 0
+        long_count = 0
+        short_wins = 0
+        short_count = 0
+        
+        for t in closed_trades:
+            # t có thể là dict hoặc Row
+            t_dict = dict(t) if not isinstance(t, dict) else t
+            coin = t_dict.get("coin", "UNKNOWN").upper()
+            pnl = t_dict.get("pnl", 0.0)
+            direction = t_dict.get("direction", "LONG")
+            
+            total_pnl += pnl
+            if pnl > 0:
+                wins += 1
+                if pnl > largest_win:
+                    largest_win = pnl
+            else:
+                if pnl < largest_loss:
+                    largest_loss = pnl
+                    
+            if direction == "LONG":
+                long_count += 1
+                if pnl > 0:
+                    long_wins += 1
+            elif direction == "SHORT":
+                short_count += 1
+                if pnl > 0:
+                    short_wins += 1
+                    
+            if coin not in coin_stats:
+                coin_stats[coin] = {"count": 0, "wins": 0, "pnl": 0.0}
+            coin_stats[coin]["count"] += 1
+            coin_stats[coin]["pnl"] += pnl
+            if pnl > 0:
+                coin_stats[coin]["wins"] += 1
+                 
+        # Định dạng kết quả thống kê từng coin
+        coin_report = []
+        for coin, stat in coin_stats.items():
+            coin_report.append({
+                "coin": coin,
+                "total_trades": stat["count"],
+                "pnl": round(stat["pnl"], 2),
+                "win_rate": round(stat["wins"] / stat["count"] * 100, 1) if stat["count"] > 0 else 0.0
+            })
+             
+        # Thời gian chạy thử nghiệm
+        start_time_str = getattr(self, "test_start_time", "")
+        if start_time_str:
+            try:
+                start_dt = datetime.fromisoformat(start_time_str)
+                elapsed = datetime.now() - start_dt
+                days_elapsed = elapsed.days + (elapsed.seconds / 86400.0)
+            except:
+                days_elapsed = 0.0
+        else:
+            days_elapsed = 0.0
+            start_time_str = datetime.now().isoformat()
+             
+        initial_bal = getattr(self, "test_start_balance", self.balance)
+        if initial_bal <= 0:
+            initial_bal = self.INITIAL_BALANCE
+        current_bal = self.balance
+        roi = (current_bal - initial_bal) / initial_bal * 100 if initial_bal > 0 else 0.0
+         
+        return {
+            "test_start_time": start_time_str,
+            "days_elapsed": round(days_elapsed, 2),
+            "initial_balance": round(initial_bal, 2),
+            "current_balance": round(current_bal, 2),
+            "net_pnl": round(total_pnl, 2),
+            "roi_pct": round(roi, 2),
+            "total_trades": total_trades,
+            "win_rate": round(wins / total_trades * 100, 1) if total_trades > 0 else 0.0,
+            "largest_win": round(largest_win, 2),
+            "largest_loss": round(largest_loss, 2),
+            "long_stats": {
+                "count": long_count,
+                "win_rate": round(long_wins / long_count * 100, 1) if long_count > 0 else 0.0
+            },
+            "short_stats": {
+                "count": short_count,
+                "win_rate": round(short_wins / short_count * 100, 1) if short_count > 0 else 0.0
+            },
+            "coin_breakdown": coin_report
         }

@@ -512,6 +512,23 @@ def get_balance_history():
     if not te: return {"history": []}
     return {"history": te.balance_history[-50:], "balance": te.balance}
 
+@app.get("/api/trading/report")
+def get_trading_report():
+    te = ctx["trade_engine"]
+    if not te: return {"error": "Not init"}
+    return te.generate_profit_report()
+
+class ResetReq(BaseModel):
+    amount: float = 10000.0
+
+@app.post("/api/trading/reset")
+def reset_trading(req: ResetReq):
+    te = ctx["trade_engine"]
+    if not te: raise HTTPException(500, "No trade engine")
+    te.reset_portfolio(req.amount)
+    return {"success": True, "balance": te.balance}
+
+
 # ============================================
 #  AUTO SL/TP BACKGROUND MONITOR
 # ============================================
