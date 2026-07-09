@@ -19,7 +19,7 @@ class SignalScanner:
     Gửi thông báo tức thời khi phát hiện đảo chiều (LONG / SHORT).
     """
 
-    def __init__(self, symbols: list[str] = None, timeframes: list[str] = None, interval_seconds: int = 300):
+    def __init__(self, symbols: list[str] = None, timeframes: list[str] = None, interval_seconds: int = 300, trade_engine = None, signal_tracker = None):
         self.symbols = symbols or ["BTC/USDT", "ETH/USDT", "SOL/USDT", "PAXG/USDT"]
         self.timeframes = timeframes or ["15m", "1h", "4h"]
         self.interval = interval_seconds
@@ -27,6 +27,8 @@ class SignalScanner:
         self.analyzer = TechnicalAnalyzer()
         self.tg_notifier = TelegramNotifier()
         self.zalo_notifier = ZaloNotifier()
+        self.trade_engine = trade_engine
+        self.signal_tracker = signal_tracker
         
         # Lưu trữ trạng thái tín hiệu trước đó: key = "SYMBOL_TIMEFRAME", value = "LONG"/"SHORT"/"NEUTRAL"
         self.last_signals: dict[str, str] = {}
@@ -47,6 +49,44 @@ class SignalScanner:
         if self._task:
             self._task.cancel()
             logger.info("⏹️ SignalScanner đã dừng.")
+
+    def calculate_signal_rating(self, signal: dict, tf: str, macro_trend: str) -> int:
+        """
+        Tính số sao (rating) cho tín hiệu: từ 1 đến 5 sao.
+        """
+        direction = signal.get("direction", "NEUTRAL")
+        if direction == "NEUTRAL":
+            return 0
+            
+        rating = 3  # Điểm cơ sở (Mặc định 3 sao cho tín hiệu đủ điều kiện)
+        
+        bull_score = signal.get("bull_score", 0)
+        bear_score = signal.get("bear_score", 0)
+        indicator_score = bull_score if direction == "LONG" else bear_score
+        
+        # 1. Chỉ báo kỹ thuật đồng thuận mạnh
+        if indicator_score >= 5:
+            rating += 1
+            
+        # 2. Đồng thuận xu hướng lớn 4h
+        if tf in ("15m", "1h"):
+            is_trend_aligned = (direction == "LONG" and macro_trend == "BULLISH") or (direction == "SHORT" and macro_trend == "BEARISH")
+            if is_trend_aligned:
+                rating += 1
+        elif tf == "4h":
+            rating += 1
+            
+        # 3. Nếu có cảnh báo ngược xu hướng EMA50/EMA200, ghi đè rating thấp
+        reasons = signal.get("reasons", [])
+        reasons_str = "".join(reasons)
+        has_warning = "Canh bao" in reasons_str or "Huy" in reasons_str
+        if has_warning:
+            is_trend_opposite = False
+            if tf in ("15m", "1h") and macro_trend != "NEUTRAL":
+                is_trend_opposite = (direction == "LONG" and macro_trend == "BEARISH") or (direction == "SHORT" and macro_trend == "BULLISH")
+            rating = 1 if is_trend_opposite else 2
+        
+        return min(max(rating, 1), 5)
 
     async def _scan_loop(self):
         # Chờ 15 giây đầu tiên để các service khác ổn định trước khi quét lần đầu
@@ -141,6 +181,35 @@ class SignalScanner:
                                     sl = signal.get("sl", 0)
                                     tp = signal.get("tp", 0)
                                     
+                                    # Tính rating
+                                    rating = self.calculate_signal_rating(signal, tf, macro_trend)
+                                    signal["rating"] = rating
+                                    
+                                    # Tự động vào lệnh nếu Auto Trade bật và tín hiệu >= 4 sao
+                                    if self.trade_engine and self.trade_engine.auto_trade_enabled and self.signal_tracker:
+                                        if rating >= 4:
+                                            signal_key = f"{coin_name}_{tf}"
+                                            if signal_key not in self.trade_engine.positions:
+                                                logger.info(f"🤖 [Auto Trade] Tự động mở vị thế cho {signal_key} (Rating: {rating} sao)")
+                                                tp1_price = entry * (1.015 if direction == "LONG" else 0.985)
+                                                tp2_price = entry * (1.030 if direction == "LONG" else 0.970)
+                                                tp3_price = tp
+                                                self.signal_tracker.add_signal({
+                                                    "key": signal_key,
+                                                    "coin": coin_name,
+                                                    "type": "FUTURES",
+                                                    "direction": direction,
+                                                    "entry": entry,
+                                                    "sl": sl,
+                                                    "tp1": round(tp1_price, 2),
+                                                    "tp2": round(tp2_price, 2),
+                                                    "tp3": round(tp3_price, 2),
+                                                    "chat_id": self.tg_notifier.chat_id,
+                                                    "leverage": 10,
+                                                })
+                                        else:
+                                            logger.info(f"⏭️ [Auto Trade] Bỏ qua {coin_name}_{tf} vì rating={rating} < 4 sao")
+                                    
                                     # 1. Gửi Telegram Notifier
                                     logger.info(f"📨 Đang gửi tín hiệu Telegram cho {key}...")
                                     await self.tg_notifier.send_signal(
@@ -149,7 +218,8 @@ class SignalScanner:
                                         entry=entry,
                                         sl=sl,
                                         tp=tp,
-                                        reason=html.escape(reasons_str)
+                                        reason=html.escape(reasons_str),
+                                        rating=rating
                                     )
                                     
                                     # 2. Gửi Zalo Notifier (nếu có cấu hình)
@@ -158,6 +228,7 @@ class SignalScanner:
                                         f"━━━━━━━━━━━━━━━━━━\n"
                                         f"🪙 Coin: {coin_name}\n"
                                         f"👉 Hướng: {direction}\n"
+                                        f"⭐ Độ tin cậy: {'⭐' * rating}\n"
                                         f"📍 Entry: ${entry:,.4f}\n"
                                         f"🛑 Stop Loss: ${sl:,.4f}\n"
                                         f"🎯 Take Profit: ${tp:,.4f}\n"

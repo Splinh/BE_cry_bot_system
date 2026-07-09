@@ -2620,7 +2620,11 @@ def main():
         try:
             from analytics.signal_scanner import SignalScanner
             global signal_scanner_service
-            signal_scanner_service = SignalScanner(interval_seconds=300)
+            signal_scanner_service = SignalScanner(
+                interval_seconds=300,
+                trade_engine=trade_engine,
+                signal_tracker=signal_tracker
+            )
             signal_scanner_service.start()
         except Exception as e:
             logger.error(f"Khong the khoi dong Signal Scanner: {e}")

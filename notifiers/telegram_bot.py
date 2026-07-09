@@ -54,15 +54,33 @@ class TelegramNotifier:
         sl: float,
         tp: float,
         reason: str = "",
+        rating: int = 3,
     ):
-        """Gửi tín hiệu giao dịch (Trading Signal) về Telegram."""
+        """Gửi tín hiệu giao dịch (Trading Signal) về Telegram kèm độ tin cậy."""
         emoji = "🟢" if direction.upper() == "LONG" else "🔴"
         risk_reward = abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
+
+        rating_stars = "⭐" * rating
+        rating_label = ""
+        if rating == 5:
+            rating_label = "🔥 CỰC MẠNH (Xác suất cao)"
+        elif rating == 4:
+            rating_label = "✨ MẠNH (Ưu tiên)"
+        elif rating == 3:
+            rating_label = "⚡ TRUNG BÌNH"
+        elif rating == 2:
+            if "canh bao" in reason.lower() or "nguoc xu huong" in reason.lower():
+                rating_label = "🎣 BẮT ĐÁY MẠO HIỂM"
+            else:
+                rating_label = "⚖️ TRUNG BÌNH YẾU"
+        else:
+            rating_label = "⚠️ YẾU (Nhiễu / Bỏ qua)"
 
         msg = (
             f"{emoji} <b>TÍN HIỆU {direction.upper()}</b> {emoji}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🪙 <b>Coin:</b> {coin}\n"
+            f"⭐ <b>Độ tin cậy:</b> {rating_stars} ({rating_label})\n"
             f"📍 <b>Entry:</b> ${entry:,.2f}\n"
             f"🛑 <b>Stop Loss:</b> ${sl:,.2f}\n"
             f"🎯 <b>Take Profit:</b> ${tp:,.2f}\n"
