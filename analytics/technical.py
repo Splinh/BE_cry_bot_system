@@ -793,23 +793,38 @@ class TechnicalAnalyzer:
             direction = None
 
         # --- TREND FILTERS (Ngan chan giao dich nguoc xu huong) ---
+        from core.config import Config
         ema50 = latest.get("ema50")
         ema200 = latest.get("ema200")
         
+        enable_filter = getattr(Config, "ENABLE_TREND_FILTER", True)
+
         if direction == "LONG":
             if ema50 is not None and pd.notna(ema50) and price < ema50:
-                direction = None
-                reasons.append("Huy LONG: Gia duoi EMA50 (Nguoc xu huong)")
+                if enable_filter:
+                    direction = None
+                    reasons.append("Huy LONG: Gia duoi EMA50 (Nguoc xu huong)")
+                else:
+                    reasons.append("Canh bao LONG: Gia duoi EMA50 (Nguoc xu huong)")
             elif ema200 is not None and pd.notna(ema200) and price < ema200:
-                direction = None
-                reasons.append("Huy LONG: Gia duoi EMA200 (Nguoc xu huong)")
+                if enable_filter:
+                    direction = None
+                    reasons.append("Huy LONG: Gia duoi EMA200 (Nguoc xu huong)")
+                else:
+                    reasons.append("Canh bao LONG: Gia duoi EMA200 (Nguoc xu huong)")
         elif direction == "SHORT":
             if ema50 is not None and pd.notna(ema50) and price > ema50:
-                direction = None
-                reasons.append("Huy SHORT: Gia tren EMA50 (Nguoc xu huong)")
+                if enable_filter:
+                    direction = None
+                    reasons.append("Huy SHORT: Gia tren EMA50 (Nguoc xu huong)")
+                else:
+                    reasons.append("Canh bao SHORT: Gia tren EMA50 (Nguoc xu huong)")
             elif ema200 is not None and pd.notna(ema200) and price > ema200:
-                direction = None
-                reasons.append("Huy SHORT: Gia tren EMA200 (Nguoc xu huong)")
+                if enable_filter:
+                    direction = None
+                    reasons.append("Huy SHORT: Gia tren EMA200 (Nguoc xu huong)")
+                else:
+                    reasons.append("Canh bao SHORT: Gia tren EMA200 (Nguoc xu huong)")
 
         if direction == "LONG":
             sl = price * 0.985   # Stop Loss -1.5%

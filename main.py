@@ -2098,6 +2098,23 @@ async def cmd_autotrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Sai cu phap. Dung <code>/autotrade on</code> hoac <code>/autotrade off</code>.", parse_mode="HTML")
 
+async def cmd_trendfilter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bat/tat bo loc xu huong (Trend Filter: EMA50/EMA200)."""
+    if not context.args:
+        status = "BẬT" if Config.ENABLE_TREND_FILTER else "TẮT"
+        await update.message.reply_text(f"Bộ lọc xu hướng (EMA50/EMA200) hiện đang: {status}. Dùng `/trendfilter on|off` để thay đổi.")
+        return
+
+    arg = context.args[0].lower()
+    if arg == "on":
+        Config.ENABLE_TREND_FILTER = True
+        await update.message.reply_text("\U0001f7e2 Đã <b>BẬT</b> bộ lọc xu hướng. Tín hiệu ngược xu hướng (dưới EMA50/EMA200) sẽ bị hủy.", parse_mode="HTML")
+    elif arg == "off":
+        Config.ENABLE_TREND_FILTER = False
+        await update.message.reply_text("\u26a0\ufe0f Đã <b>TẮT</b> bộ lọc xu hướng. Bot sẽ nhận tất cả tín hiệu đảo chiều (ngay cả dưới EMA50/EMA200) nhưng sẽ hiển thị cảnh báo.", parse_mode="HTML")
+    else:
+        await update.message.reply_text("Sai cu phap. Dung <code>/trendfilter on</code> hoac <code>/trendfilter off</code>.", parse_mode="HTML")
+
 async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xem trang thai tai khoan Paper Trading."""
     is_callback = update.callback_query is not None
@@ -2476,6 +2493,7 @@ def main():
 
     # Paper Trading / Auto-Trade commands
     app.add_handler(CommandHandler("autotrade", requires_whitelist(cmd_autotrade)))
+    app.add_handler(CommandHandler("trendfilter", requires_whitelist(cmd_trendfilter)))
     app.add_handler(CommandHandler("paper", requires_whitelist(cmd_paper)))
     app.add_handler(CommandHandler("trailsl", requires_whitelist(cmd_trailsl)))
     app.add_handler(CommandHandler("alert", requires_whitelist(cmd_alert)))

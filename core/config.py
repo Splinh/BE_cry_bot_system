@@ -54,6 +54,11 @@ class Config:
     MAX_DAILY_LOSS_USD: float = float(os.getenv("MAX_DAILY_LOSS_USD", "1000"))  # lo toi da/ngay -> khoa mo lenh
     MAX_DAILY_LOSS_PCT: float = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.10"))  # hoac 10% balance dau ngay
 
+    # --- Trend Filter ---
+    ENABLE_TREND_FILTER: bool = os.getenv("ENABLE_TREND_FILTER", "true").lower() == "true"
+
+
+
     @classmethod
     def validate(cls):
         """Kiểm tra các biến bắt buộc đã được điền chưa."""
