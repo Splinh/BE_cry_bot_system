@@ -345,6 +345,8 @@ class ManualTradeReq(BaseModel):
     leverage: int = 1         # 1-125x
     wallet_id: Optional[int] = None     # Wallet ID to use
     wallet_label: Optional[str] = ""    # Wallet label for display
+    custom_sl: Optional[float] = None
+    custom_tp: Optional[float] = None
 
 @app.post("/api/trading/open")
 async def open_manual_trade(req: ManualTradeReq):
@@ -424,6 +426,31 @@ async def open_manual_trade(req: ManualTradeReq):
     except Exception as e:
         logger.warning(f"Smart SL/TP import error: {e}")
     
+    # Apply custom overrides
+    if req.custom_sl is not None or req.custom_tp is not None:
+        if not smart_levels or smart_levels.get("error"):
+            smart_levels = {
+                "sl": req.custom_sl or (current_price * 0.98 if req.direction.upper() == "LONG" else current_price * 1.02),
+                "tp1": req.custom_tp or (current_price * 1.04 if req.direction.upper() == "LONG" else current_price * 0.96),
+                "tp2": (req.custom_tp or (current_price * 1.04 if req.direction.upper() == "LONG" else current_price * 0.96)) * 1.5,
+                "tp3": (req.custom_tp or (current_price * 1.04 if req.direction.upper() == "LONG" else current_price * 0.96)) * 2.0,
+                "method": "Custom SL/TP Override",
+            }
+        else:
+            if req.custom_sl is not None:
+                smart_levels["sl"] = req.custom_sl
+                smart_levels["method"] = "Custom SL"
+            if req.custom_tp is not None:
+                smart_levels["tp1"] = req.custom_tp
+                # Scale tp2, tp3 proportionally
+                diff = abs(req.custom_tp - current_price)
+                if req.direction.upper() == "LONG":
+                    smart_levels["tp2"] = req.custom_tp + diff * 0.5
+                    smart_levels["tp3"] = req.custom_tp + diff * 1.0
+                else:
+                    smart_levels["tp2"] = req.custom_tp - diff * 0.5
+                    smart_levels["tp3"] = req.custom_tp - diff * 1.0
+                    
     pos = te.open_manual_position(
         coin=req.coin.upper(),
         direction=req.direction.upper(),
@@ -842,8 +869,13 @@ async def leverage_analyze(coin: str, leverage: int = 10, market_type: str = "fu
             "resistance": TechnicalAnalyzer._round_price(smart_levels.get("resistance", 0), price),
             "support2": TechnicalAnalyzer._round_price(smart_levels.get("support2", 0), price),
             "resistance2": TechnicalAnalyzer._round_price(smart_levels.get("resistance2", 0), price),
-            "bb_lower": _sf(latest.get("bb_lower")),
-            "bb_upper": _sf(latest.get("bb_upper")),
+            "support3": TechnicalAnalyzer._round_price(smart_levels.get("support3", 0), price),
+            "resistance3": TechnicalAnalyzer._round_price(smart_levels.get("resistance3", 0), price),
+            "fib_382": TechnicalAnalyzer._round_price(smart_levels.get("fib_382", 0), price),
+            "fib_500": TechnicalAnalyzer._round_price(smart_levels.get("fib_500", 0), price),
+            "fib_618": TechnicalAnalyzer._round_price(smart_levels.get("fib_618", 0), price),
+            "bb_lower": _sf(smart_levels.get("bb_lower", latest.get("bb_lower"))),
+            "bb_upper": _sf(smart_levels.get("bb_upper", latest.get("bb_upper"))),
             "ema20": _sf(latest.get("ema20")),
             "atr": round(smart_levels.get("atr", 0), 6),
             "sl_method": smart_levels.get("method", ""),

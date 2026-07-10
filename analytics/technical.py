@@ -132,6 +132,8 @@ class TechnicalAnalyzer:
         df["resistance1"] = 2 * df["pivot"] - df["low"]
         df["support2"] = df["pivot"] - (df["high"] - df["low"])
         df["resistance2"] = df["pivot"] + (df["high"] - df["low"])
+        df["support3"] = df["low"] - 2 * (df["high"] - df["pivot"])
+        df["resistance3"] = df["high"] + 2 * (df["pivot"] - df["low"])
 
         # Fibonacci Retracement (tinh tu high/low 50 nen gan nhat)
         recent = df.tail(50)
@@ -264,8 +266,10 @@ class TechnicalAnalyzer:
         # === LAY S/R LEVELS ===
         support1 = self._safe_float(latest.get("support1"), price * 0.97)
         support2 = self._safe_float(latest.get("support2"), price * 0.95)
+        support3 = self._safe_float(latest.get("support3"), price * 0.93)
         resistance1 = self._safe_float(latest.get("resistance1"), price * 1.03)
         resistance2 = self._safe_float(latest.get("resistance2"), price * 1.05)
+        resistance3 = self._safe_float(latest.get("resistance3"), price * 1.07)
         bb_lower = self._safe_float(latest.get("bb_lower"), price * 0.98)
         bb_upper = self._safe_float(latest.get("bb_upper"), price * 1.02)
 
@@ -423,6 +427,13 @@ class TechnicalAnalyzer:
             "resistance": self._round_price(resistance1, price),
             "support2": self._round_price(support2, price),
             "resistance2": self._round_price(resistance2, price),
+            "support3": self._round_price(support3, price),
+            "resistance3": self._round_price(resistance3, price),
+            "fib_382": self._round_price(fib_382, price),
+            "fib_500": self._round_price(fib_500, price),
+            "fib_618": self._round_price(fib_618, price),
+            "bb_lower": self._round_price(bb_lower, price),
+            "bb_upper": self._round_price(bb_upper, price),
             "method": "ATR+S/R+Fib",
             "method_detail": " | ".join(method_parts),
             "macro_risk": macro_risk,
