@@ -30,6 +30,7 @@ class TradeEngine:
     OKX_FUTURES_TAKER_FEE = 0.0005  # 0.05%
     OKX_SPOT_TAKER_FEE = 0.0010     # 0.10%
     OKX_MMR = 0.004                 # 0.4% Maintenance Margin Ratio
+    CORRELATED_COINS = {"BTC", "ETH", "SOL"}
 
     def __init__(self):
         self.balance: float = self.INITIAL_BALANCE
@@ -115,6 +116,62 @@ class TradeEngine:
         self.auto_trade_enabled = enable
         self._save_data()
         return self.auto_trade_enabled
+
+    @staticmethod
+    def compare_timeframes(tf1: str, tf2: str) -> int:
+        """
+        So sanh 2 khung thoi gian.
+        Tra ve:
+           -1 neu tf1 < tf2
+            0 neu tf1 == tf2
+            1 neu tf1 > tf2
+        """
+        order = {"15m": 1, "1h": 2, "4h": 3, "1d": 4}
+        val1 = order.get(str(tf1).lower(), 0)
+        val2 = order.get(str(tf2).lower(), 0)
+        if val1 < val2:
+            return -1
+        elif val1 > val2:
+            return 1
+        return 0
+
+    def get_current_price_sync(self, coin: str) -> float:
+        """Lay gia hien tai cua 1 dong coin dong bo."""
+        import ccxt
+        try:
+            exchange = ccxt.binance({"enableRateLimit": True})
+            ticker = exchange.fetch_ticker(f"{coin.upper()}/USDT")
+            return float(ticker["last"])
+        except Exception as e:
+            logger.error(f"Loi lay gia dong bo cho {coin}: {e}")
+            return 0.0
+
+    def send_notification_sync(self, text: str):
+        """Gui thong bao Telegram & Zalo bat dong bo tu moi truong dong bo."""
+        try:
+            import asyncio
+            from notifiers.telegram_bot import TelegramNotifier
+            from notifiers.zalo_bot import ZaloNotifier
+
+            async def _send():
+                try:
+                    tg = TelegramNotifier()
+                    await tg.send_message(text, chat_id=tg.chat_id)
+                except Exception as e:
+                    logger.error(f"Loi gui Telegram: {e}")
+                try:
+                    zalo = ZaloNotifier()
+                    await zalo.send_message(text)
+                except Exception as e:
+                    logger.error(f"Loi gui Zalo: {e}")
+
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_send())
+            else:
+                loop.run_until_complete(_send())
+        except Exception as e:
+            logger.error(f"Loi gui thong bao sync: {e}")
 
     # ==========================================
     #  RISK GUARDS (hard caps tuyet doi)
@@ -647,20 +704,78 @@ class TradeEngine:
 
         is_live = sqlite_db and sqlite_db.get_live_mode()
         sig_key = signal["key"]
-        
-        # Da co vi the cho coin nay chua? De hieu, moi coin chi choi 1 lenh
-        for pos_key, pos_data in self.positions.items():
-            if pos_data["coin"] == signal["coin"] and pos_data.get("live", False) == is_live:
-                logger.warning(f"TradeEngine: Bo qua {sig_key} vi dang co lenh mo voi {signal['coin']} (Live: {is_live})")
-                return None
-
+        coin = signal.get("coin", "").upper()
+        direction = signal.get("direction", "LONG").upper()
         entry = signal.get("entry", signal.get("price", 0))
         sl = signal.get("sl", 0)
-        direction = signal.get("direction", "LONG")
+        rating = signal.get("rating", 3)
+        tf = signal.get("tf", "1h")
 
         if entry <= 0 or sl <= 0:
             logger.warning(f"TradeEngine: Signal thieu entry/sl -> Bo qua")
             return None
+
+        # 1. KIỂM TRA ĐẢO CHIỀU TRỰC TIẾP TRÊN CÙNG ĐỒNG COIN
+        same_coin_pos_key = None
+        same_coin_pos_data = None
+        for pos_key, pos_data in self.positions.items():
+            if pos_data.get("coin", "").upper() == coin and pos_data.get("status") != "CLOSED" and pos_data.get("live", False) == is_live:
+                same_coin_pos_key = pos_key
+                same_coin_pos_data = pos_data
+                break
+
+        if same_coin_pos_data:
+            existing_dir = same_coin_pos_data.get("direction", "LONG").upper()
+            if existing_dir != direction and rating >= 4 and self.compare_timeframes(tf, same_coin_pos_data.get("tf", "1h")) >= 0:
+                # Thực hiện đảo chiều vị thế: Đóng lệnh cũ
+                current_price = self.get_current_price_sync(coin) or entry
+                logger.info(f"🔄 [Đảo Chiều] Đóng {coin} {existing_dir} cũ (giá {current_price}) để mở {direction} mới.")
+                self.close_position(same_coin_pos_key, current_price, reason="REVERSAL_SIGNAL")
+                
+                msg_text = (
+                    f"🔄 <b>ĐẢO CHIỀU VỊ THẾ - {coin}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"Phát hiện tín hiệu <b>{direction} ({tf})</b> cực mạnh ({rating} sao).\n"
+                    f"Hệ thống đã tự động đóng vị thế <b>{existing_dir}</b> cũ để chuẩn bị mở vị thế <b>{direction}</b> mới.\n"
+                    f"Giá đóng vị thế cũ: ${current_price:,.4f}\n"
+                    f"━━━━━━━━━━━━━━━━━━"
+                )
+                self.send_notification_sync(msg_text)
+            else:
+                logger.warning(f"TradeEngine: Bo qua {sig_key} vi dang co lenh mo voi {coin} (Live: {is_live})")
+                return None
+
+        # 2. PHÒNG VỆ XU HƯỚNG CHÉO (CORRELATION PROTECTION)
+        if coin in self.CORRELATED_COINS and rating >= 4 and tf in ("4h", "1d"):
+            for pos_key, pos_data in list(self.positions.items()):
+                pos_coin = pos_data.get("coin", "").upper()
+                pos_status = pos_data.get("status", "")
+                pos_dir = pos_data.get("direction", "").upper()
+                pos_live = pos_data.get("live", False)
+                
+                if (pos_coin in self.CORRELATED_COINS and pos_coin != coin 
+                        and pos_status != "CLOSED" and pos_live == is_live 
+                        and pos_dir != direction):
+                    # Vị thế đối nghịch trên đồng coin tương quan. Áp dụng phòng vệ:
+                    # a) Dời SL về Entry
+                    entry_p = pos_data.get("entry_price", 0)
+                    pos_data["sl"] = entry_p
+                    
+                    # b) Chốt lời / Giảm vị thế 50%
+                    opp_price = self.get_current_price_sync(pos_coin) or entry_p
+                    logger.info(f"⚠️ [Phòng Vệ Chéo] Giảm 50% vị thế {pos_coin} {pos_dir} ở giá {opp_price} do có tín hiệu {direction} {coin} mạnh.")
+                    self.partial_close(pos_key, opp_price, pct_to_close=0.5)
+                    
+                    msg_text = (
+                        f"⚠️ <b>PHÒNG VỆ XU HƯỚNG CHÉO (HEDGE)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"Tín hiệu mới: { '🟢' if direction == 'LONG' else '🔴' } <b>{direction} {coin} ({tf})</b> cực mạnh ({rating} sao).\n"
+                        f"Hệ thống đã tự động phòng vệ vị thế đối nghịch đang mở:\n"
+                        f"• Đã dời SL vị thế <b>{pos_coin} {pos_dir}</b> về Entry (${entry_p:,.4f}).\n"
+                        f"• Đã tự động chốt lời/giảm volume vị thế 50% ở giá ${opp_price:,.4f}.\n"
+                        f"━━━━━━━━━━━━━━━━━━"
+                    )
+                    self.send_notification_sync(msg_text)
 
         # Tinh toan khoi luong
         leverage = signal.get("leverage", 1)
@@ -726,7 +841,9 @@ class TradeEngine:
             "live": is_live,
             "fee_rate": fee_rate,
             "fees_paid": round(open_fee, 4),
-            "liq_price": round(liq_price, 4)
+            "liq_price": round(liq_price, 4),
+            "tf": tf,
+            "rating": rating
         }
 
         if is_live and live_order:

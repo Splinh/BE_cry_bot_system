@@ -67,6 +67,33 @@ def inject_instances(trade_engine, tele_mgr, twit_mgr, system_status,
 #  OVERVIEW
 # ============================================
 
+import time
+
+fng_cache = {
+    "value": 50,
+    "sentiment": "Neutral",
+    "last_updated": 0
+}
+
+def get_fear_and_greed():
+    global fng_cache
+    now = time.time()
+    if now - fng_cache["last_updated"] > 3600:
+        try:
+            res = httpx.get("https://api.alternative.me/fng/", timeout=5.0)
+            if res.status_code == 200:
+                data = res.json()
+                if "data" in data and len(data["data"]) > 0:
+                    item = data["data"][0]
+                    fng_cache = {
+                        "value": int(item.get("value", 50)),
+                        "sentiment": item.get("value_classification", "Neutral"),
+                        "last_updated": now
+                    }
+        except Exception as e:
+            logger.warning(f"Error fetching Fear & Greed index: {e}")
+    return fng_cache
+
 @app.get("/")
 def health():
     return {"status": "ok"}
@@ -90,6 +117,8 @@ def get_overview():
                 admin_count = len(json.load(f).get("admin_ids", []))
         except: pass
 
+    fng = get_fear_and_greed()
+
     return {
         "status": status.get("status", "Running"),
         "version": status.get("version", "1.0"),
@@ -105,6 +134,7 @@ def get_overview():
         "twitter_bots": len(twit.workers) if twit else 0,
         "total_wallets": wallet_summary.get("total_wallets", 0),
         "active_wallets": wallet_summary.get("active_wallets", 0),
+        "fear_and_greed": fng,
     }
 
 # ============================================

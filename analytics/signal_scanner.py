@@ -173,7 +173,10 @@ class SignalScanner:
                                 
                                 # Chỉ gửi thông báo khi có tín hiệu cụ thể LONG hoặc SHORT
                                 if direction in ("LONG", "SHORT"):
-                                    coin_name = symbol.split("/")[0]
+                                    coin_name = symbol.split("/")[0].upper()
+                                    if coin_name not in ("BTC", "ETH"):
+                                        logger.info(f"⏭️ [Scanner] Bỏ qua thông báo và giao dịch Futures cho {coin_name} (chỉ chấp nhận BTC/ETH)")
+                                        continue
                                     reasons = signal.get("reasons", [])
                                     reasons_str = ", ".join(reasons) if reasons else "Chỉ báo kỹ thuật đảo chiều"
                                     
@@ -206,6 +209,8 @@ class SignalScanner:
                                                     "tp3": round(tp3_price, 2),
                                                     "chat_id": self.tg_notifier.chat_id,
                                                     "leverage": 10,
+                                                    "rating": rating,
+                                                    "tf": tf,
                                                 })
                                         else:
                                             logger.info(f"⏭️ [Auto Trade] Bỏ qua {coin_name}_{tf} vì rating={rating} < 4 sao")

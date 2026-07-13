@@ -1162,6 +1162,7 @@ async def _analyze_and_signal(update, token: str, signal_type: str):
         await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
 
         # DANG KY THEO DOI TU DONG
+        rating = max(1, min(5, int(confidence / 20))) if 'confidence' in locals() else 3
         signal_key = f"{token}_{signal_type}"
         signal_tracker.add_signal({
             "key": signal_key,
@@ -1175,6 +1176,8 @@ async def _analyze_and_signal(update, token: str, signal_type: str):
             "tp3": tp3,
             "chat_id": chat_id,
             "leverage": leverage,
+            "rating": rating,
+            "tf": "1h",
         })
 
         await update.message.reply_text(
