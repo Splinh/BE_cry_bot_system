@@ -10,6 +10,7 @@
 | `/signals`           | Xem tín hiệu đang theo dõi TP/SL                    |
 | `/scan`              | Quét nhanh BTC, ETH, SOL                            |
 | `/news`              | Tin tức crypto mới nhất                             |
+| `/fng` hoặc `/fear`  | Chỉ số Tham lam & Sợ hãi (Fear & Greed Index)       |
 
 > ⏱ Sau khi dùng `/spot` hoặc `/futures`, bot tự giám sát giá mỗi 15s và thông báo TP1/TP2/TP3/SL.
 

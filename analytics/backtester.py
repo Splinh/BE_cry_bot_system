@@ -451,19 +451,20 @@ class BacktestEngine:
 
         bull = 0
         bear = 0
-        reasons = []
+        bull_reasons = []
+        bear_reasons = []
 
         # 1. RSI
         rsi = row.get("rsi")
         if rsi is not None and not (isinstance(rsi, float) and math.isnan(rsi)):
             if rsi < 30:
-                bull += 2; reasons.append(f"RSI qua ban ({rsi:.0f})")
+                bull += 2; bull_reasons.append(f"RSI qua ban ({rsi:.0f})")
             elif rsi < 40:
-                bull += 1; reasons.append(f"RSI thap ({rsi:.0f})")
+                bull += 1; bull_reasons.append(f"RSI thap ({rsi:.0f})")
             elif rsi > 70:
-                bear += 2; reasons.append(f"RSI qua mua ({rsi:.0f})")
+                bear += 2; bear_reasons.append(f"RSI qua mua ({rsi:.0f})")
             elif rsi > 60:
-                bear += 1; reasons.append(f"RSI cao ({rsi:.0f})")
+                bear += 1; bear_reasons.append(f"RSI cao ({rsi:.0f})")
 
         # 2. MACD crossover
         macd = row.get("macd")
@@ -473,9 +474,9 @@ class BacktestEngine:
         if all(v is not None and not (isinstance(v, float) and math.isnan(v))
                for v in [macd, macd_sig, prev_macd, prev_sig]):
             if prev_macd < prev_sig and macd > macd_sig:
-                bull += 2; reasons.append("MACD Golden Cross")
+                bull += 2; bull_reasons.append("MACD Golden Cross")
             elif prev_macd > prev_sig and macd < macd_sig:
-                bear += 2; reasons.append("MACD Death Cross")
+                bear += 2; bear_reasons.append("MACD Death Cross")
 
         # 3. EMA trend
         ema20 = row.get("ema20")
@@ -483,17 +484,17 @@ class BacktestEngine:
         if ema20 is not None and ema50 is not None:
             if not (math.isnan(ema20) or math.isnan(ema50)):
                 if price > ema20 > ema50:
-                    bull += 1; reasons.append("Uptrend (EMA)")
+                    bull += 1; bull_reasons.append("Uptrend (EMA)")
                 elif price < ema20 < ema50:
-                    bear += 1; reasons.append("Downtrend (EMA)")
+                    bear += 1; bear_reasons.append("Downtrend (EMA)")
 
         # 4. Bollinger Bands
         bb_lower = row.get("bb_lower")
         bb_upper = row.get("bb_upper")
         if bb_lower is not None and not math.isnan(bb_lower) and price <= bb_lower:
-            bull += 1; reasons.append("Cham BB duoi")
+            bull += 1; bull_reasons.append("Cham BB duoi")
         if bb_upper is not None and not math.isnan(bb_upper) and price >= bb_upper:
-            bear += 1; reasons.append("Cham BB tren")
+            bear += 1; bear_reasons.append("Cham BB tren")
 
         # 5. ADX
         adx = row.get("adx")
@@ -503,27 +504,27 @@ class BacktestEngine:
             if di_p is not None and di_m is not None:
                 if not (math.isnan(di_p) or math.isnan(di_m)):
                     if di_p > di_m:
-                        bull += 1; reasons.append(f"ADX manh +DI ({adx:.0f})")
+                        bull += 1; bull_reasons.append(f"ADX manh +DI ({adx:.0f})")
                     else:
-                        bear += 1; reasons.append(f"ADX manh -DI ({adx:.0f})")
+                        bear += 1; bear_reasons.append(f"ADX manh -DI ({adx:.0f})")
 
         # 6. VWAP
         vwap = row.get("vwap")
         if vwap is not None and not math.isnan(vwap):
             if price > vwap * 1.01:
-                bull += 1; reasons.append("Tren VWAP")
+                bull += 1; bull_reasons.append("Tren VWAP")
             elif price < vwap * 0.99:
-                bear += 1; reasons.append("Duoi VWAP")
+                bear += 1; bear_reasons.append("Duoi VWAP")
 
         # 7. Support / Resistance
         s1 = row.get("support1")
         r1 = row.get("resistance1")
         if s1 is not None and not math.isnan(s1):
             if abs(price - s1) / price < 0.005:
-                bull += 1; reasons.append("Tai Support S1")
+                bull += 1; bull_reasons.append("Tai Support S1")
         if r1 is not None and not math.isnan(r1):
             if abs(price - r1) / price < 0.005:
-                bear += 1; reasons.append("Tai Resistance R1")
+                bear += 1; bear_reasons.append("Tai Resistance R1")
 
         # Decision
         score = max(bull, bear)
@@ -533,6 +534,8 @@ class BacktestEngine:
         direction = "LONG" if bull > bear else "SHORT" if bear > bull else None
         if direction is None:
             return None
+
+        reasons = bull_reasons if direction == "LONG" else bear_reasons
 
         return {
             "direction": direction,

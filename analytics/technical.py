@@ -687,23 +687,24 @@ class TechnicalAnalyzer:
         # === HE THONG TINH DIEM (SCORING) ===
         bull_score = 0  # Diem Long
         bear_score = 0  # Diem Short
-        reasons = []
+        bull_reasons = []
+        bear_reasons = []
 
         # 1. RSI
         rsi = latest.get("rsi", 50)
         if rsi is not None:
             if rsi < 30:
                 bull_score += 2
-                reasons.append(f"RSI qua ban ({rsi:.1f})")
+                bull_reasons.append(f"RSI qua ban ({rsi:.1f})")
             elif rsi < 40:
                 bull_score += 1
-                reasons.append(f"RSI thap ({rsi:.1f})")
+                bull_reasons.append(f"RSI thap ({rsi:.1f})")
             elif rsi > 70:
                 bear_score += 2
-                reasons.append(f"RSI qua mua ({rsi:.1f})")
+                bear_reasons.append(f"RSI qua mua ({rsi:.1f})")
             elif rsi > 60:
                 bear_score += 1
-                reasons.append(f"RSI cao ({rsi:.1f})")
+                bear_reasons.append(f"RSI cao ({rsi:.1f})")
 
         # 2. MACD cat len/xuong
         macd = latest.get("macd")
@@ -714,10 +715,10 @@ class TechnicalAnalyzer:
             if pd.notna(macd) and pd.notna(macd_sig) and pd.notna(prev_macd) and pd.notna(prev_sig):
                 if prev_macd < prev_sig and macd > macd_sig:
                     bull_score += 2
-                    reasons.append("MACD cat len (Golden Cross)")
+                    bull_reasons.append("MACD cat len (Golden Cross)")
                 elif prev_macd > prev_sig and macd < macd_sig:
                     bear_score += 2
-                    reasons.append("MACD cat xuong (Death Cross)")
+                    bear_reasons.append("MACD cat xuong (Death Cross)")
 
         # 3. EMA Trend
         ema20 = latest.get("ema20")
@@ -725,24 +726,25 @@ class TechnicalAnalyzer:
         if ema20 is not None and ema50 is not None and pd.notna(ema20) and pd.notna(ema50):
             if price > ema20 > ema50:
                 bull_score += 1
-                reasons.append("Gia tren EMA20, EMA50 (Uptrend)")
+                bull_reasons.append("Gia tren EMA20, EMA50 (Uptrend)")
             elif price < ema20 < ema50:
                 bear_score += 1
-                reasons.append("Gia duoi EMA20, EMA50 (Downtrend)")
+                bear_reasons.append("Gia duoi EMA20, EMA50 (Downtrend)")
 
         # 4. Bollinger Bands
         bb_lower = latest.get("bb_lower")
         bb_upper = latest.get("bb_upper")
         if bb_lower is not None and pd.notna(bb_lower) and price <= bb_lower:
             bull_score += 1
-            reasons.append("Gia cham Bollinger Band duoi")
+            bull_reasons.append("Gia cham Bollinger Band duoi")
         if bb_upper is not None and pd.notna(bb_upper) and price >= bb_upper:
             bear_score += 1
-            reasons.append("Gia cham Bollinger Band tren")
+            bear_reasons.append("Gia cham Bollinger Band tren")
 
         # 5. Volume Spike
         if latest.get("vol_spike", False):
-            reasons.append("Volume tang dot bien")
+            bull_reasons.append("Volume tang dot bien")
+            bear_reasons.append("Volume tang dot bien")
 
         # === CHI BAO MOI ===
 
@@ -751,10 +753,10 @@ class TechnicalAnalyzer:
         if vwap is not None and pd.notna(vwap):
             if price > vwap * 1.01:
                 bull_score += 1
-                reasons.append("Gia tren VWAP (tang)")
+                bull_reasons.append("Gia tren VWAP (tang)")
             elif price < vwap * 0.99:
                 bear_score += 1
-                reasons.append("Gia duoi VWAP (giam)")
+                bear_reasons.append("Gia duoi VWAP (giam)")
 
         # 7. ADX (Xu huong manh > 25)
         adx = latest.get("adx")
@@ -764,10 +766,10 @@ class TechnicalAnalyzer:
             if di_plus is not None and di_minus is not None and pd.notna(di_plus) and pd.notna(di_minus):
                 if di_plus > di_minus:
                     bull_score += 1
-                    reasons.append(f"ADX manh ({adx:.0f}), +DI chiem uu the")
+                    bull_reasons.append(f"ADX manh ({adx:.0f}), +DI chiem uu the")
                 else:
                     bear_score += 1
-                    reasons.append(f"ADX manh ({adx:.0f}), -DI chiem uu the")
+                    bear_reasons.append(f"ADX manh ({adx:.0f}), -DI chiem uu the")
 
         # 8. Fibonacci (gia gan muc ho tro/khang cu)
         fib_618 = latest.get("fib_618")
@@ -775,11 +777,11 @@ class TechnicalAnalyzer:
         if fib_618 is not None and pd.notna(fib_618):
             if abs(price - fib_618) / price < 0.003:  # Gan muc Fib 61.8% (0.3%)
                 bull_score += 1
-                reasons.append("Gia tai Fibonacci 61.8% (ho tro manh)")
+                bull_reasons.append("Gia tai Fibonacci 61.8% (ho tro manh)")
         if fib_382 is not None and pd.notna(fib_382):
             if abs(price - fib_382) / price < 0.003:  # Gan muc Fib 38.2% (0.3%)
                 bear_score += 1
-                reasons.append("Gia tai Fibonacci 38.2% (khang cu)")
+                bear_reasons.append("Gia tai Fibonacci 38.2% (khang cu)")
 
         # 9. Support / Resistance
         support1 = latest.get("support1")
@@ -787,21 +789,30 @@ class TechnicalAnalyzer:
         if support1 is not None and pd.notna(support1):
             if abs(price - support1) / price < 0.005:
                 bull_score += 1
-                reasons.append("Gia tai vung ho tro S1")
+                bull_reasons.append("Gia tai vung ho tro S1")
         if resistance1 is not None and pd.notna(resistance1):
             if abs(price - resistance1) / price < 0.005:
                 bear_score += 1
-                reasons.append("Gia tai vung khang cu R1")
+                bear_reasons.append("Gia tai vung khang cu R1")
 
         # === RA QUYET DINH ===
         min_score = 3  # Can it nhat 3 diem de ra tin hieu
 
         if bull_score >= min_score and bull_score > bear_score:
             direction = "LONG"
+            reasons = bull_reasons
         elif bear_score >= min_score and bear_score > bull_score:
             direction = "SHORT"
+            reasons = bear_reasons
         else:
             direction = None
+            reasons = []
+            if bull_reasons:
+                reasons.extend(bull_reasons)
+            if bear_reasons:
+                reasons.extend(bear_reasons)
+            if not reasons:
+                reasons = ["Chua co tin hieu ro rang"]
 
         # --- TREND FILTERS (Ngan chan giao dich nguoc xu huong) ---
         from core.config import Config

@@ -722,6 +722,53 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await crawler.close()
 
 
+async def cmd_fng(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lenh /fng - Xem chi so Tham lam & So hai (Fear & Greed Index)."""
+    is_callback = update.callback_query is not None
+    reply_target = update.callback_query.message if is_callback else update.message
+    
+    if is_callback:
+        await update.callback_query.answer()
+
+    from api.server import get_fear_and_greed
+    
+    try:
+        fng = get_fear_and_greed()
+        val = fng.get("value", 50)
+        sent = fng.get("sentiment", "Neutral")
+        
+        # Dich nghia tieng Viet
+        viet_sent = {
+            "Extreme Fear": "Sợ Hãi Tột Độ 🔴",
+            "Fear": "Sợ Hãi 🟠",
+            "Neutral": "Trung Lập 🟡",
+            "Greed": "Tham Lam 🟢",
+            "Extreme Greed": "Tham Lam Tột Độ 🔥"
+        }.get(sent, sent)
+        
+        # Bieu do thanh bar: [██████████░░░░░░░░░░]
+        bar_length = 20
+        filled = int(val / 100 * bar_length)
+        bar = "█" * filled + "░" * (bar_length - filled)
+        
+        lines = [
+            "📊 <b>CHỈ SỐ THAM LAM & SỢ HÃI (FEAR & GREED)</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"🎯 <b>Điểm số:</b> <code>{val}/100</code>",
+            f"📈 <b>Trạng thái:</b> <b>{viet_sent}</b>",
+            f"📊 <b>Biểu đồ:</b> <code>[{bar}]</code>",
+            "━━━━━━━━━━━━━━━━━━",
+            "<i>Chỉ số được tự động đồng bộ từ api.alternative.me</i>"
+        ]
+        
+        keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_start")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await reply_target.reply_text("\n".join(lines), reply_markup=reply_markup, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Loi lay chi so FNG: {e}")
+        await reply_target.reply_text("❌ Có lỗi xảy ra khi lấy chỉ số Tham lam & Sợ hãi.")
+
+
 # ============================================
 #  AIRDROP COMMANDS
 # ============================================
@@ -2537,6 +2584,8 @@ def main():
     app.add_handler(CommandHandler("menu", requires_whitelist(cmd_menu)))
     app.add_handler(CommandHandler("scan", requires_whitelist(cmd_scan)))
     app.add_handler(CommandHandler("news", requires_whitelist(cmd_news)))
+    app.add_handler(CommandHandler("fng", requires_whitelist(cmd_fng)))
+    app.add_handler(CommandHandler("fear", requires_whitelist(cmd_fng)))
 
     # Airdrop commands
     app.add_handler(CommandHandler("wallet", requires_whitelist(cmd_wallet)))
