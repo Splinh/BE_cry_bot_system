@@ -190,9 +190,47 @@ class SignalTracker:
             # Kiem tra moi 15 giay
             await asyncio.sleep(15)
 
+    def load_active_positions(self):
+        """Tai cac vi the dang OPEN/PARTIAL tu TradeEngine vao bo theo doi."""
+        if not self.trade_engine:
+            return
+        
+        count = 0
+        for key, pos in self.trade_engine.positions.items():
+            status = pos.get("status")
+            if status in ("OPEN", "PARTIAL"):
+                # Anh xa tu format position sang signal
+                closed_pct = pos.get("closed_pct", 0.0)
+                signal = {
+                    "key": key,
+                    "coin": pos.get("coin"),
+                    "type": pos.get("type", "FUTURES"),
+                    "direction": pos.get("direction"),
+                    "entry": pos.get("entry_price"),
+                    "sl": pos.get("sl"),
+                    "tp1": pos.get("tp1"),
+                    "tp2": pos.get("tp2"),
+                    "tp3": pos.get("tp3"),
+                    "chat_id": pos.get("chat_id") or self.notifier.chat_id,
+                    "leverage": pos.get("leverage", 10),
+                    "tf": pos.get("tf", "1h"),
+                    "tp1_hit": closed_pct >= 0.3,
+                    "tp2_hit": closed_pct >= 0.6,
+                    "tp3_hit": False,
+                    "sl_hit": False,
+                    "created_at": pos.get("open_time", datetime.now().isoformat())
+                }
+                self.active_signals[key] = signal
+                count += 1
+                logger.info(f"🔄 Da khoi phuc vi the theo doi: {key} | Huong: {signal['direction']} | Trang thai: {status} | Da chot: {closed_pct*100}%")
+        
+        if count > 0:
+            logger.success(f"🎉 Da khoi phuc thanh cong {count} vi the dang hoat dong vao Signal Tracker.")
+
     def start(self):
         """Bat dau theo doi (chay background)."""
         if not self._running:
+            self.load_active_positions()
             self._running = True
             self._task = asyncio.ensure_future(self._check_signals_loop())
             logger.info("Signal Tracker da khoi dong.")

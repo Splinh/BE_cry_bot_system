@@ -102,21 +102,26 @@ class SignalScanner:
                 for symbol in self.symbols:
                     for tf in self.timeframes:
                         keys.append((symbol, tf))
-                        tasks.append(self.analyzer.analyze(symbol, tf))
+                        tasks.append(self.analyzer.analyze_full(symbol, tf))
                 
                 # Chạy song song toàn bộ các truy vấn phân tích
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 
                 # Gom kết quả phân tích theo cặp coin để lọc đa khung thời gian
                 signals_by_symbol = {}
-                for (symbol, tf), signal in zip(keys, results):
-                    if isinstance(signal, Exception) or not signal:
-                        if isinstance(signal, Exception):
-                            logger.error(f"Lỗi phân tích song song {symbol}_{tf}: {signal}")
+                dfs_by_key = {}
+                for (symbol, tf), res in zip(keys, results):
+                    if isinstance(res, Exception) or not res:
+                        if isinstance(res, Exception):
+                            logger.error(f"Lỗi phân tích song song {symbol}_{tf}: {res}")
+                        continue
+                    df, signal = res
+                    if not signal or signal.get("direction") == "NEUTRAL":
                         continue
                     if symbol not in signals_by_symbol:
                         signals_by_symbol[symbol] = {}
                     signals_by_symbol[symbol][tf] = signal
+                    dfs_by_key[f"{symbol}_{tf}"] = df
 
                 # Xử lý tín hiệu đã được lọc đồng thuận xu hướng
                 for symbol, tf_signals in signals_by_symbol.items():
@@ -184,6 +189,37 @@ class SignalScanner:
                                     sl = signal.get("sl", 0)
                                     tp = signal.get("tp", 0)
                                     
+                                    # Mặc định dùng static levels
+                                    smart_sl = sl
+                                    smart_tp1 = entry * (1.015 if direction == "LONG" else 0.985)
+                                    smart_tp2 = entry * (1.030 if direction == "LONG" else 0.970)
+                                    smart_tp3 = tp
+                                    
+                                    # Thử tính Smart Levels từ DataFrame
+                                    df = dfs_by_key.get(key)
+                                    if df is not None:
+                                        try:
+                                            from analytics.macro_calendar import MacroCalendar
+                                            macro = MacroCalendar()
+                                            risk_data = await macro.assess_risk()
+                                            macro_risk = risk_data.get("risk_level", "NORMAL")
+                                            await macro.close()
+                                            
+                                            smart_levels = self.analyzer.compute_smart_levels(
+                                                df=df,
+                                                direction=direction,
+                                                leverage=10,
+                                                macro_risk=macro_risk
+                                            )
+                                            if "error" not in smart_levels:
+                                                smart_sl = smart_levels["sl"]
+                                                smart_tp1 = smart_levels["tp1"]
+                                                smart_tp2 = smart_levels["tp2"]
+                                                smart_tp3 = smart_levels["tp3"]
+                                                logger.info(f"✨ [Smart Levels] Da tinh muc SL/TP cho {key}: SL={smart_sl}, TP1={smart_tp1}, TP2={smart_tp2}, TP3={smart_tp3}")
+                                        except Exception as ex:
+                                            logger.error(f"Loi tinh toan Smart Levels cho {key}: {ex}")
+
                                     # Tính rating
                                     rating = self.calculate_signal_rating(signal, tf, macro_trend)
                                     signal["rating"] = rating
@@ -194,19 +230,16 @@ class SignalScanner:
                                             signal_key = f"{coin_name}_{tf}"
                                             if signal_key not in self.trade_engine.positions:
                                                 logger.info(f"🤖 [Auto Trade] Tự động mở vị thế cho {signal_key} (Rating: {rating} sao)")
-                                                tp1_price = entry * (1.015 if direction == "LONG" else 0.985)
-                                                tp2_price = entry * (1.030 if direction == "LONG" else 0.970)
-                                                tp3_price = tp
                                                 self.signal_tracker.add_signal({
                                                     "key": signal_key,
                                                     "coin": coin_name,
                                                     "type": "FUTURES",
                                                     "direction": direction,
                                                     "entry": entry,
-                                                    "sl": sl,
-                                                    "tp1": round(tp1_price, 2),
-                                                    "tp2": round(tp2_price, 2),
-                                                    "tp3": round(tp3_price, 2),
+                                                    "sl": smart_sl,
+                                                    "tp1": round(smart_tp1, 2),
+                                                    "tp2": round(smart_tp2, 2),
+                                                    "tp3": round(smart_tp3, 2),
                                                     "chat_id": self.tg_notifier.chat_id,
                                                     "leverage": 10,
                                                     "rating": rating,
@@ -221,8 +254,8 @@ class SignalScanner:
                                         coin=f"{coin_name} ({tf})",
                                         direction=direction,
                                         entry=entry,
-                                        sl=sl,
-                                        tp=tp,
+                                        sl=smart_sl,
+                                        tp=smart_tp3,
                                         reason=html.escape(reasons_str),
                                         rating=rating
                                     )
@@ -235,8 +268,8 @@ class SignalScanner:
                                         f"👉 Hướng: {direction}\n"
                                         f"⭐ Độ tin cậy: {'⭐' * rating}\n"
                                         f"📍 Entry: ${entry:,.4f}\n"
-                                        f"🛑 Stop Loss: ${sl:,.4f}\n"
-                                        f"🎯 Take Profit: ${tp:,.4f}\n"
+                                        f"🛑 Stop Loss: ${smart_sl:,.4f}\n"
+                                        f"🎯 Take Profit: ${smart_tp3:,.4f}\n"
                                         f"💡 Lý do: {reasons_str}\n"
                                         f"━━━━━━━━━━━━━━━━━━"
                                     )

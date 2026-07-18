@@ -892,3 +892,17 @@ class TechnicalAnalyzer:
         df = self.calculate_indicators(df)
         signal = self.generate_signal(df, symbol)
         return signal
+
+    async def analyze_full(self, symbol: str = "BTC/USDT", timeframe: str = "1h") -> tuple:
+        """
+        Pipeline day du: Lay du lieu -> Tinh chi bao -> Sinh tin hieu.
+        Tra ve ca DataFrame va dict tin hieu.
+        """
+        import pandas as pd
+        df = await self.get_ohlcv(symbol, timeframe)
+        if df.empty:
+            return pd.DataFrame(), None
+
+        df = self.calculate_indicators(df)
+        signal = self.generate_signal(df, symbol)
+        return df, signal

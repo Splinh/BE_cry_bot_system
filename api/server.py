@@ -147,48 +147,79 @@ import time as _time
 _price_cache = {"prices": {}, "ts": 0}
 
 def _get_latest_prices() -> dict:
-    """Lay gia real-time tu Binance REST API (cache 2s)."""
+    """Lay gia real-time tu Binance REST API hoac WebSocket."""
     now = _time.time()
     if now - _price_cache["ts"] < 2 and _price_cache["prices"]:
         return _price_cache["prices"]
     
-    # Thu lay tu WebSocket truoc
+    # 1. Thu lay tu WebSocket truoc
+    prices = {}
     pm = ctx.get("price_monitor")
     if pm and hasattr(pm, 'ws') and pm.ws.latest_prices:
-        _price_cache["prices"] = pm.ws.latest_prices
-        _price_cache["ts"] = now
-        return _price_cache["prices"]
+        prices = pm.ws.latest_prices.copy()
     
-    # Fallback: Binance REST API
-    endpoints = [
-        "https://api.binance.com/api/v3/ticker/24hr",
-        "https://api1.binance.com/api/v3/ticker/24hr",
-        "https://api2.binance.com/api/v3/ticker/24hr",
-        "https://api3.binance.com/api/v3/ticker/24hr",
-    ]
-    for url in endpoints:
+    # 2. Kiem tra xem co vi the dang mo nao co coin chua co gia trong prices cache ko
+    te = ctx.get("trade_engine")
+    missing_coins = set()
+    if te and te.positions:
+        for pos in te.positions.values():
+            if pos.get("status") != "CLOSED":
+                coin = pos.get("coin", "").upper()
+                symbol = f"{coin}USDT"
+                if symbol not in prices:
+                    missing_coins.add(symbol)
+                    
+    # 3. Neu co coin bi thieu, fetch tu Binance REST API de bo sung
+    if missing_coins:
         try:
-            resp = httpx.get(url,
-                             params={"symbols": '["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT","DOTUSDT","MATICUSDT"]'},
-                             timeout=5)
+            missing_list = list(missing_coins)
+            # Xoa khoang trang de Binance API khong bao loi Parameter Illegal characters
+            symbols_param = json.dumps(missing_list).replace(" ", "")
+            resp = httpx.get("https://api.binance.com/api/v3/ticker/price",
+                             params={"symbols": symbols_param}, timeout=5)
             if resp.status_code == 200:
-                result = {}
                 for t in resp.json():
-                    result[t["symbol"]] = {
-                        "price": float(t.get("lastPrice", 0)),
-                        "change_pct": float(t.get("priceChangePercent", 0)),
-                        "high": float(t.get("highPrice", 0)),
-                        "low": float(t.get("lowPrice", 0)),
-                        "volume": float(t.get("volume", 0)),
-                        "open": float(t.get("openPrice", 0)),
+                    prices[t["symbol"]] = {
+                        "price": float(t.get("price", 0)),
+                        "timestamp": datetime.now().isoformat()
                     }
-                _price_cache["prices"] = result
-                _price_cache["ts"] = now
-                return result
+                logger.info(f"💾 Da bo sung gia tu REST API cho cac coin thieu: {missing_list}")
         except Exception as e:
-            logger.warning(f"Binance REST price fetch error for {url}: {e}")
-    
-    return _price_cache["prices"]
+            logger.warning(f"Failed to fetch missing coins {missing_list} from REST API: {e}")
+            
+    # 4. Neu prices van rong (do ca WebSocket va check deu thieu hoac loi), chay fallback toan bo
+    if not prices:
+        endpoints = [
+            "https://api.binance.com/api/v3/ticker/24hr",
+            "https://api1.binance.com/api/v3/ticker/24hr",
+            "https://api2.binance.com/api/v3/ticker/24hr",
+            "https://api3.binance.com/api/v3/ticker/24hr",
+        ]
+        for url in endpoints:
+            try:
+                resp = httpx.get(url,
+                                 params={"symbols": '["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT","DOTUSDT","MATICUSDT"]'},
+                                 timeout=5)
+                if resp.status_code == 200:
+                    result = {}
+                    for t in resp.json():
+                        result[t["symbol"]] = {
+                            "price": float(t.get("lastPrice", 0)),
+                            "change_pct": float(t.get("priceChangePercent", 0)),
+                            "high": float(t.get("highPrice", 0)),
+                            "low": float(t.get("lowPrice", 0)),
+                            "volume": float(t.get("volume", 0)),
+                            "open": float(t.get("openPrice", 0)),
+                        }
+                    _price_cache["prices"] = result
+                    _price_cache["ts"] = now
+                    return result
+            except Exception as e:
+                logger.warning(f"Binance REST price fetch error for {url}: {e}")
+
+    _price_cache["prices"] = prices
+    _price_cache["ts"] = now
+    return prices
 
 @app.get("/api/prices")
 def get_prices():
