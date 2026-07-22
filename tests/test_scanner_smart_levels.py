@@ -14,7 +14,15 @@ from analytics.signal_scanner import SignalScanner
 async def test_scanner_smart_levels():
     print("=== Testing SignalScanner with Smart SL/TP ===")
     te = TradeEngine()
+    te.balance = 100000.0
+    te.daily_realized_pnl = 0.0
+    te.daily_start_balance = 100000.0
+    te.positions = {}
     te.auto_trade_enabled = True
+    te.max_margin_per_trade_usd = 50000.0
+    te.max_margin_per_trade_pct = 0.50
+    te.max_total_margin_usd = 80000.0
+    te.max_total_margin_pct = 0.80
     
     st = SignalTracker(trade_engine=te)
     

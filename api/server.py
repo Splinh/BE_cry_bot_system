@@ -338,6 +338,10 @@ def get_trading():
             pos["change_24h"] = change_24h
             pos["liq_price"] = p.get("liq_price", 0.0)
             pos["fees_paid"] = p.get("fees_paid", 0.0)
+            pos["runner_mode"] = p.get("runner_mode", False)
+            pos["chandelier_sl"] = p.get("chandelier_sl", p.get("sl", 0.0))
+            pos["peak_price"] = p.get("peak_price", p.get("entry_price", 0.0))
+            pos["trough_price"] = p.get("trough_price", p.get("entry_price", 0.0))
             total_unrealized += pnl
         else:
             pos["current_price"] = 0
@@ -524,7 +528,9 @@ async def open_manual_trade(req: ManualTradeReq):
     )
     
     if not pos:
-        raise HTTPException(400, "Khong the mo lenh. Kiem tra so du.")
+        error_msg = te.last_error or "Khong the mo lenh. Kiem tra so du."
+        te.last_error = ""  # reset
+        raise HTTPException(400, error_msg)
     
     # Them smart levels info cho frontend
     if smart_levels:

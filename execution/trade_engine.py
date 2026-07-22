@@ -40,6 +40,7 @@ class TradeEngine:
         self.auto_trade_enabled: bool = False
         self.last_sync: str = ""
         self.test_start_time: str = ""
+        self.last_error: str = ""
         self.test_start_balance: float = self.INITIAL_BALANCE
 
         # === Risk management: hard caps tu Config (don vi PCT theo balance + USD tuyet doi) ===
@@ -394,37 +395,34 @@ class TradeEngine:
                         closed_trades.append({"key": sig_key, "reason": "SL_HIT", "price": current_price, "pnl": result.get("pnl", 0)})
                     continue
 
-            # Kiem tra TP3 (dong het)
-            if tp3 > 0:
-                if direction == "LONG" and current_price >= tp3:
-                    result = self.close_position(sig_key, current_price, reason="TP3_HIT")
+            # Kiem tra TP3 (chot 25% tiep theo -> tong 75%, kich hoat 25% Runner Position)
+            if tp3 > 0 and closed_pct < 0.75:
+                if (direction == "LONG" and current_price >= tp3) or \
+                   (direction == "SHORT" and current_price <= tp3):
+                    result = self.partial_close(sig_key, current_price, pct_to_close=0.25)
                     if result:
-                        closed_trades.append({"key": sig_key, "reason": "TP3_HIT", "price": current_price, "pnl": result.get("pnl", 0)})
-                    continue
-                elif direction == "SHORT" and current_price <= tp3:
-                    result = self.close_position(sig_key, current_price, reason="TP3_HIT")
-                    if result:
-                        closed_trades.append({"key": sig_key, "reason": "TP3_HIT", "price": current_price, "pnl": result.get("pnl", 0)})
+                        pos["runner_mode"] = True
+                        closed_trades.append({"key": sig_key, "reason": "TP3_HIT_RUNNER_START", "price": current_price, "pnl": result.get("pnl", 0)})
                     continue
 
-            # Kiem tra TP2 (chot 30% phan con lai)
-            if tp2 > 0 and closed_pct < 0.6:
+            # Kiem tra TP2 (chot 25% phan tiep theo)
+            if tp2 > 0 and closed_pct < 0.50:
                 if (direction == "LONG" and current_price >= tp2) or \
                    (direction == "SHORT" and current_price <= tp2):
-                    result = self.partial_close(sig_key, current_price, pct_to_close=0.3)
+                    result = self.partial_close(sig_key, current_price, pct_to_close=0.25)
                     if result:
                         closed_trades.append({"key": sig_key, "reason": "TP2_HIT", "price": current_price, "pnl": result.get("pnl", 0)})
                     continue
 
-            # Kiem tra TP1 (chot 30%)
-            if tp1 > 0 and closed_pct < 0.3:
+            # Kiem tra TP1 (chot 25% dau tien)
+            if tp1 > 0 and closed_pct < 0.25:
                 if (direction == "LONG" and current_price >= tp1) or \
                    (direction == "SHORT" and current_price <= tp1):
-                    result = self.partial_close(sig_key, current_price, pct_to_close=0.3)
+                    result = self.partial_close(sig_key, current_price, pct_to_close=0.25)
                     if result:
                         closed_trades.append({"key": sig_key, "reason": "TP1_HIT", "price": current_price, "pnl": result.get("pnl", 0)})
 
-            # Trailing Stop Loss: dich SL len khi gia tang thuan chieu
+            # Trailing Stop Loss (Chandelier ATR Trail): dich SL theo peak/trough
             if sig_key in self.positions:
                 self._update_trailing_sl(sig_key, current_price)
 
@@ -432,36 +430,55 @@ class TradeEngine:
 
     def _update_trailing_sl(self, sig_key: str, current_price: float):
         """
-        Trailing SL: tu dong dich SL de bao ve loi nhuan.
-        - Khi gia qua TP1 -> dich SL len break-even (entry)
-        - Khi gia qua TP2 -> dich SL len TP1
-        Logic chi ap dung neu trailing_sl=True trong position.
+        Trailing SL (Chandelier ATR Exit): tu dong dich SL de bao ve loi nhuan va giu runner position.
+        - Cap nhat peak_price (LONG) / trough_price (SHORT)
+        - Dich SL theo Chandelier Exit (peak - 2.5*ATR cho Long, trough + 2.5*ATR cho Short)
+        - Khi gia qua TP2 (closed >= 50%) -> khoi khoa Break-Even / TP1
         """
         pos = self.positions.get(sig_key)
-        if not pos or not pos.get("trailing_sl"):
+        if not pos or not pos.get("trailing_sl", True):
             return
 
         direction = pos.get("direction", "LONG")
         entry = pos.get("entry_price", 0)
         sl = pos.get("sl", 0)
         tp1 = pos.get("tp1", 0)
-        tp2 = pos.get("tp2", 0)
+        closed_pct = pos.get("closed_pct", 0)
+        atr = pos.get("atr", entry * 0.02)
+        if not atr or atr <= 0:
+            atr = entry * 0.02
 
         new_sl = sl
         if direction == "LONG":
-            if tp2 > 0 and current_price >= tp2 and tp1 > sl:
-                new_sl = tp1   # Dich SL len TP1
-            elif tp1 > 0 and current_price >= tp1 and entry > sl:
-                new_sl = entry  # Dich SL len break-even
+            peak = max(pos.get("peak_price", entry), current_price)
+            pos["peak_price"] = round(peak, 4)
+            
+            # Neu da chot 50% (qua TP2) -> Lock Break-Even hoac TP1 làm đáy
+            if closed_pct >= 0.50:
+                base_sl = max(entry, tp1) if tp1 > 0 else entry
+                new_sl = max(new_sl, base_sl)
+            
+            # Chandelier ATR Trailing Stop
+            chandelier_sl = peak - 2.5 * atr
+            if chandelier_sl > new_sl and chandelier_sl < current_price:
+                new_sl = round(chandelier_sl, 4)
+
         else:  # SHORT
-            if tp2 > 0 and current_price <= tp2 and tp1 < sl:
-                new_sl = tp1
-            elif tp1 > 0 and current_price <= tp1 and entry < sl:
-                new_sl = entry
+            trough = min(pos.get("trough_price", entry), current_price)
+            pos["trough_price"] = round(trough, 4)
+            
+            if closed_pct >= 0.50:
+                base_sl = min(entry, tp1) if tp1 > 0 else entry
+                new_sl = min(new_sl, base_sl)
+            
+            chandelier_sl = trough + 2.5 * atr
+            if chandelier_sl < new_sl and chandelier_sl > current_price:
+                new_sl = round(chandelier_sl, 4)
 
         if new_sl != sl:
             pos["sl"] = new_sl
-            logger.info(f"TRAILING SL [{sig_key}]: {sl:.4f} -> {new_sl:.4f}")
+            pos["chandelier_sl"] = new_sl
+            logger.info(f"TRAILING SL (Chandelier) [{sig_key}]: {sl:.4f} -> {new_sl:.4f}")
             self._save_data()
 
     def calculate_position_size(self, entry_price: float, stop_loss: float, leverage: int = 1) -> float:
@@ -513,8 +530,16 @@ class TradeEngine:
         if is_live:
             self.sync_binance_balance()
 
+        # Enforce Risk Guards
+        ok, reason = self.can_open_position(margin_required)
+        if not ok:
+            self.last_error = reason
+            logger.warning(f"Manual trade blocked: {reason}")
+            return None
+
         if margin_required > self.balance:
-            logger.warning(f"Manual trade: Khong du so du. Can ${margin_required:.2f}, co ${self.balance:.2f}")
+            self.last_error = f"Khong du so du. Can ${margin_required:.2f}, co ${self.balance:.2f}"
+            logger.warning(f"Manual trade: {self.last_error}")
             return None
 
         # Thực thi lệnh Live trên Binance Futures
@@ -671,7 +696,13 @@ class TradeEngine:
             "live": is_live,
             "fee_rate": fee_rate,
             "fees_paid": round(open_fee, 4),
-            "liq_price": round(liq_price, 4)
+            "liq_price": round(liq_price, 4),
+            "trailing_sl": True,
+            "peak_price": current_price,
+            "trough_price": current_price,
+            "runner_mode": False,
+            "chandelier_sl": round(sl, 4),
+            "atr": smart_levels.get("atr", 0) if smart_levels else 0,
         }
 
         if is_live and live_order:
@@ -796,6 +827,20 @@ class TradeEngine:
         if is_live:
             self.sync_binance_balance()
 
+        # Enforce Risk Guards
+        ok, reason = self.can_open_position(margin_required)
+        if not ok:
+            logger.warning(f"Auto trade blocked: {reason}")
+            msg_blocked = (
+                f"⚠️ <b>TÍN HIỆU BỊ CHẶN (RISK GUARD)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Không thể tự động mở vị thế <b>{direction} {coin}</b> ({tf}).\n"
+                f"Lý do: <b>{reason}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━"
+            )
+            self.send_notification_sync(msg_blocked)
+            return None
+
         if margin_required > self.balance:
             logger.warning(f"Auto trade: Khong du so du. Can ${margin_required:.2f}, co ${self.balance:.2f}")
             return None
@@ -843,7 +888,13 @@ class TradeEngine:
             "fees_paid": round(open_fee, 4),
             "liq_price": round(liq_price, 4),
             "tf": tf,
-            "rating": rating
+            "rating": rating,
+            "trailing_sl": True,
+            "peak_price": entry,
+            "trough_price": entry,
+            "runner_mode": False,
+            "chandelier_sl": round(sl, 4),
+            "atr": signal.get("atr", 0),
         }
 
         if is_live and live_order:

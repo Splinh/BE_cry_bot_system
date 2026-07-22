@@ -195,18 +195,18 @@ class TechnicalAnalyzer:
             tr = (recent["high"] - recent["low"]).mean()
             atr = float(tr) if tr > 0 else price * 0.02
 
-        # === ATR MULTIPLIER theo leverage ===
-        # Tang len so voi truoc de SL/TP khong qua chat voi don bay lon
+        # === ATR MULTIPLIER theo leverage (Swing & Trend Holding) ===
+        # Mo rong de SL co du room cho nhieu/retest tu nhien cua thi truong
         if leverage >= 50:
-            atr_mult = 0.5      # 0.3 -> 0.5 (rong hon)
+            atr_mult = 0.8
         elif leverage >= 25:
-            atr_mult = 0.7      # 0.5 -> 0.7
+            atr_mult = 1.2
         elif leverage >= 10:
-            atr_mult = 1.0
+            atr_mult = 1.8
         elif leverage >= 5:
-            atr_mult = 1.5
+            atr_mult = 2.2
         else:
-            atr_mult = 2.0
+            atr_mult = 2.5
 
         # === MACRO RISK ADJUSTMENT ===
         macro_mult = 1.0
@@ -218,10 +218,9 @@ class TechnicalAnalyzer:
         atr_distance = atr * atr_mult * macro_mult
 
         # === CALCULATE IDEAL SL & RECOMMENDED LEVERAGE ===
-        # Gia su khong co don bay (leverage = 1) thi dung atr_mult mac dinh la 1.5 - 2.0
-        ideal_atr_mult = 1.5
+        ideal_atr_mult = 2.0
         ideal_atr_distance = atr * ideal_atr_mult * macro_mult
-        ideal_min_sl_distance = max(atr * 0.7, price * 0.015)  # min 1.5% stop loss
+        ideal_min_sl_distance = max(atr * 1.0, price * 0.020)  # min 2.0% stop loss
         ideal_distance = max(ideal_atr_distance, ideal_min_sl_distance)
         ideal_sl_pct = ideal_distance / price
 
@@ -246,18 +245,17 @@ class TechnicalAnalyzer:
             )
 
         # === MINIMUM DISTANCE GUARD (leverage-aware) ===
-        # Leverage cao can nhieu room hon de tranh bi quet SL trong vai phut
-        # min_pct dam bao SL cach entry it nhat X% cua gia
+        # Mo rong min_pct de SL luon co khoang tho an toan tren chart Swing
         if leverage >= 100:
-            min_pct = 0.004     # 0.4% — 125x liq = 0.8%, SL cach 50% liq
+            min_pct = 0.006     # 0.6%
         elif leverage >= 50:
-            min_pct = 0.006     # 0.6% — 50x liq = 2%, SL cach 30% liq
-        elif leverage >= 25:
-            min_pct = 0.008     # 0.8%
-        elif leverage >= 10:
             min_pct = 0.010     # 1.0%
+        elif leverage >= 25:
+            min_pct = 0.014     # 1.4%
+        elif leverage >= 10:
+            min_pct = 0.018     # 1.8%
         else:
-            min_pct = 0.015     # 1.5% cho leverage thap, cho thoai mai
+            min_pct = 0.025     # 2.5% cho đòn bẩy thấp / Swing mode
 
         min_sl_distance = max(atr * 0.7, price * min_pct)
         # Dam bao atr_distance khong nho hon min
@@ -303,9 +301,9 @@ class TechnicalAnalyzer:
 
             if supports_below:
                 nearest_support = supports_below[0]
-                # SL = max(ATR-based, nearest support - buffer)
+                # SL = min(ATR-based, nearest support - buffer)
                 sr_sl = nearest_support - atr * 0.2  # Nho duoi support 1 chut
-                sl = max(atr_sl, sr_sl)  # Lay muc cao hon (an toan hon)
+                sl = min(atr_sl, sr_sl)  # Lay muc thap hon (an toan hon vi duoi ca support va atr)
                 method_parts.append(f"S/R adjusted: ${sl:.2f}")
             else:
                 sl = atr_sl
@@ -362,7 +360,7 @@ class TechnicalAnalyzer:
             if resistances_above:
                 nearest_resistance = resistances_above[0]
                 sr_sl = nearest_resistance + atr * 0.2
-                sl = min(atr_sl, sr_sl)
+                sl = max(atr_sl, sr_sl)  # Lay muc cao hon (an toan hon vi tren ca resistance va atr)
                 method_parts.append(f"S/R adjusted: ${sl:.2f}")
             else:
                 sl = atr_sl

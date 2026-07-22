@@ -76,9 +76,14 @@ class SignalScanner:
         elif tf == "4h":
             rating += 1
             
-        # 3. Nếu có cảnh báo ngược xu hướng EMA50/EMA200, ghi đè rating thấp
+        # 3. ADX Trend Filter cho Swing (1h, 4h): nếu không có lực đẩy ADX mạnh (ADX < 25), giảm 1 sao tránh sideway
         reasons = signal.get("reasons", [])
         reasons_str = "".join(reasons)
+        has_adx = "ADX manh" in reasons_str
+        if tf in ("1h", "4h") and not has_adx:
+            rating -= 1
+
+        # 4. Nếu có cảnh báo ngược xu hướng EMA50/EMA200, ghi đè rating thấp
         has_warning = "Canh bao" in reasons_str or "Huy" in reasons_str
         if has_warning:
             is_trend_opposite = False
@@ -108,7 +113,7 @@ class SignalScanner:
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 
                 # Gom kết quả phân tích theo cặp coin để lọc đa khung thời gian
-                signals_by_symbol = {}
+                all_analyses = {}
                 dfs_by_key = {}
                 for (symbol, tf), res in zip(keys, results):
                     if isinstance(res, Exception) or not res:
@@ -116,38 +121,46 @@ class SignalScanner:
                             logger.error(f"Lỗi phân tích song song {symbol}_{tf}: {res}")
                         continue
                     df, signal = res
-                    if not signal or signal.get("direction") == "NEUTRAL":
-                        continue
-                    if symbol not in signals_by_symbol:
-                        signals_by_symbol[symbol] = {}
-                    signals_by_symbol[symbol][tf] = signal
+                    all_analyses[(symbol, tf)] = (df, signal)
+                    # Vẫn lưu df vào dfs_by_key cho tất cả để phục vụ tính Smart Levels nếu cần
                     dfs_by_key[f"{symbol}_{tf}"] = df
 
                 # Xử lý tín hiệu đã được lọc đồng thuận xu hướng
-                for symbol, tf_signals in signals_by_symbol.items():
+                for symbol in self.symbols:
                     # 1. Xác định xu hướng lớn từ khung 4h (khung lớn nhất được quét)
-                    signal_4h = tf_signals.get("4h")
                     macro_trend = "NEUTRAL"
-                    if signal_4h:
-                        reasons_4h = signal_4h.get("reasons", [])
-                        dir_4h = signal_4h.get("direction", "NEUTRAL")
-                        reasons_4h_str = "".join(reasons_4h)
-                        
-                        if dir_4h == "LONG":
-                            macro_trend = "BULLISH"
-                        elif dir_4h == "SHORT":
-                            macro_trend = "BEARISH"
-                        elif "Gia tren EMA20, EMA50" in reasons_4h_str or "Gia tren EMA50" in reasons_4h_str:
-                            macro_trend = "BULLISH"
-                        elif "Gia duoi EMA20, EMA50" in reasons_4h_str or "Gia duoi EMA50" in reasons_4h_str:
-                            macro_trend = "BEARISH"
-                        elif "Huy LONG: Gia duoi EMA50" in reasons_4h_str:
-                            macro_trend = "BEARISH"
-                        elif "Huy SHORT: Gia tren EMA50" in reasons_4h_str:
-                            macro_trend = "BULLISH"
+                    res_4h = all_analyses.get((symbol, "4h"))
+                    if res_4h:
+                        df_4h, signal_4h = res_4h
+                        if df_4h is not None and not df_4h.empty:
+                            import pandas as pd
+                            latest_4h = df_4h.iloc[-1]
+                            price_4h = float(latest_4h["close"])
+                            ema50_4h = latest_4h.get("ema50")
+                            
+                            if ema50_4h is not None and not pd.isna(ema50_4h):
+                                if price_4h > ema50_4h:
+                                    macro_trend = "BULLISH"
+                                elif price_4h < ema50_4h:
+                                    macro_trend = "BEARISH"
+                                logger.info(f"📈 [Macro Trend Filter] {symbol} 4h Price (${price_4h:.2f}) vs EMA50 (${ema50_4h:.2f}) -> {macro_trend}")
+                            
+                            # Fallback sang signal 4h nếu EMA50 chưa có
+                            if macro_trend == "NEUTRAL" and signal_4h:
+                                dir_4h = signal_4h.get("direction", "NEUTRAL")
+                                if dir_4h == "LONG":
+                                    macro_trend = "BULLISH"
+                                elif dir_4h == "SHORT":
+                                    macro_trend = "BEARISH"
 
                     # 2. Xử lý từng khung thời gian
-                    for tf, signal in tf_signals.items():
+                    for tf in self.timeframes:
+                        res_tf = all_analyses.get((symbol, tf))
+                        if not res_tf:
+                            continue
+                        df, signal = res_tf
+                        if not signal or signal.get("direction") == "NEUTRAL":
+                            continue
                         key = f"{symbol}_{tf}"
                         try:
                             direction = signal.get("direction", "NEUTRAL")
@@ -196,6 +209,7 @@ class SignalScanner:
                                     smart_tp3 = tp
                                     
                                     # Thử tính Smart Levels từ DataFrame
+                                    smart_levels = None
                                     df = dfs_by_key.get(key)
                                     if df is not None:
                                         try:
@@ -230,6 +244,11 @@ class SignalScanner:
                                             signal_key = f"{coin_name}_{tf}"
                                             if signal_key not in self.trade_engine.positions:
                                                 logger.info(f"🤖 [Auto Trade] Tự động mở vị thế cho {signal_key} (Rating: {rating} sao)")
+                                                # Đòn bẩy thích ứng từ Smart SL/TP (cực đại là 10x)
+                                                rec_lev = smart_levels.get("recommended_leverage", 10) if (smart_levels and "error" not in smart_levels) else 10
+                                                trade_leverage = min(rec_lev, 10)
+                                                trade_leverage = max(trade_leverage, 1)
+                                                
                                                 self.signal_tracker.add_signal({
                                                     "key": signal_key,
                                                     "coin": coin_name,
@@ -241,7 +260,7 @@ class SignalScanner:
                                                     "tp2": round(smart_tp2, 2),
                                                     "tp3": round(smart_tp3, 2),
                                                     "chat_id": self.tg_notifier.chat_id,
-                                                    "leverage": 10,
+                                                    "leverage": trade_leverage,
                                                     "rating": rating,
                                                     "tf": tf,
                                                 })
