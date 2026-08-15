@@ -126,6 +126,23 @@ class Database:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Frost Kingdom Multi-Accounts
+        CREATE TABLE IF NOT EXISTS frost_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            server TEXT DEFAULT 'Server 4',
+            wallet_address TEXT DEFAULT '',
+            castle_level INTEGER DEFAULT 1,
+            has_pass INTEGER DEFAULT 0,
+            pass_expiry TEXT DEFAULT '',
+            rdia_balance REAL DEFAULT 0,
+            speedup_hours REAL DEFAULT 0,
+            referral_code TEXT DEFAULT '',
+            referred_by TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- Price Alerts
         CREATE TABLE IF NOT EXISTS price_alerts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -344,6 +361,49 @@ class Database:
     def remove_gamefi_project(self, id: int):
         conn = self._get_conn()
         conn.execute("DELETE FROM gamefi_projects WHERE id=?", (id,))
+        conn.commit()
+
+    # ==================
+    # Frost Kingdom Multi-Accounts
+    # ==================
+    def get_frost_accounts(self) -> list:
+        conn = self._get_conn()
+        rows = conn.execute("SELECT * FROM frost_accounts ORDER BY id ASC").fetchall()
+        return [dict(r) for r in rows]
+
+    def add_frost_account(self, name: str, server: str = "Server 4", wallet_address: str = "",
+                          castle_level: int = 1, has_pass: int = 0, pass_expiry: str = "",
+                          rdia_balance: float = 0, speedup_hours: float = 0,
+                          referral_code: str = "", referred_by: str = "", note: str = "") -> int:
+        conn = self._get_conn()
+        cur = conn.execute(
+            """INSERT INTO frost_accounts 
+               (name, server, wallet_address, castle_level, has_pass, pass_expiry, rdia_balance, speedup_hours, referral_code, referred_by, note) 
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (name, server, wallet_address, castle_level, has_pass, pass_expiry, rdia_balance, speedup_hours, referral_code, referred_by, note)
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def update_frost_account(self, id: int, data: dict):
+        conn = self._get_conn()
+        allowed = ["name", "server", "wallet_address", "castle_level", "has_pass", "pass_expiry", 
+                   "rdia_balance", "speedup_hours", "referral_code", "referred_by", "note"]
+        fields = []
+        values = []
+        for k, v in data.items():
+            if k in allowed:
+                fields.append(f"{k}=?")
+                values.append(v)
+        if fields:
+            values.append(id)
+            query = f"UPDATE frost_accounts SET {', '.join(fields)} WHERE id=?"
+            conn.execute(query, tuple(values))
+            conn.commit()
+
+    def remove_frost_account(self, id: int):
+        conn = self._get_conn()
+        conn.execute("DELETE FROM frost_accounts WHERE id=?", (id,))
         conn.commit()
 
     # ==================

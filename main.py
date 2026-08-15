@@ -1819,6 +1819,50 @@ async def cmd_gamefi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================
+#  FROST KINGDOM COMMAND: /frost
+# ============================================
+
+async def cmd_frost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Lenh /frost - Theo doi he sinh thai Frost Kingdom Server 4 & May tinh Cross Ramp.
+    """
+    chat_id = update.effective_chat.id
+    access = security.check_access(chat_id, "gamefi")
+    if not access["allowed"]:
+        await update.message.reply_text(f"🛡 {access['reason']}", parse_mode="HTML")
+        return
+
+    sub = context.args[0].lower() if context.args else None
+
+    if sub == "accounts":
+        accs = _db.get_frost_accounts()
+        if not accs:
+            await update.message.reply_text("❄️ <b>FROST KINGDOM ACCOUNTS</b>\nChưa có tài khoản nào được lưu trên dashboard. Hãy thêm tại web /gamefi!", parse_mode="HTML")
+            return
+        msg = "❄️ <b>DANH SÁCH TÀI KHOẢN FROST KINGDOM</b> ❄️\n" + "━"*20 + "\n"
+        for a in accs:
+            pass_str = "✅ Active" if a.get('has_pass') else "❌ Chưa mở"
+            msg += f"• <b>{a['name']}</b> ({a.get('server', 'Server 4')}) - Castle Lv.{a.get('castle_level', 1)}\n"
+            msg += f"  RDIA: {a.get('rdia_balance', 0)} | Pass: {pass_str}\n"
+        await update.message.reply_text(msg, parse_mode="HTML")
+        return
+
+    # Default overview & stats
+    msg = "❄️ <b>FROST KINGDOM SERVER 4 COMMAND CENTER</b> ❄️\n"
+    msg += "━"*24 + "\n"
+    msg += "🎮 <b>Server:</b> Server 4 (ONLINE / OPEN)\n"
+    msg += "🌐 <b>Hệ sinh thái:</b> ONEchain (NEXUS)\n"
+    msg += "💎 <b>Token Cốt Lõi:</b> $RDIA (Hard Cap: 500,000 token)\n"
+    msg += "💰 <b>Reward Pool:</b> Chia sẻ 5% doanh thu nạp toàn game\n"
+    msg += "👑 <b>Gói Mở Khóa Mint:</b> Imperial Logistics Officer ($14.99/tháng)\n\n"
+    msg += "📋 <b>Lệnh Tra Cứu:</b>\n"
+    msg += "• <code>/frost</code>: Xem tổng quan Server 4\n"
+    msg += "• <code>/frost accounts</code>: Xem tiến độ các tài khoản farm\n"
+    msg += "• <i>Web Dashboard: http://localhost:5173/gamefi</i>"
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+# ============================================
 #  LISTING COMMANDS: /listing, /monitor
 # ============================================
 
@@ -2608,12 +2652,13 @@ def main():
     app.add_handler(CommandHandler("alert", requires_whitelist(cmd_alert)))
     app.add_handler(CommandHandler("alerts", requires_whitelist(cmd_alerts)))
 
-    # DEX Gem commands
+    # DEX Gem & GameFi commands
     app.add_handler(CommandHandler("gem", requires_whitelist(cmd_gem)))
     app.add_handler(CommandHandler("newtoken", requires_whitelist(cmd_newtoken)))
     app.add_handler(CommandHandler("check", requires_whitelist(cmd_check)))
     app.add_handler(CommandHandler("buy", requires_whitelist(cmd_buy)))
     app.add_handler(CommandHandler("gamefi", requires_whitelist(cmd_gamefi)))
+    app.add_handler(CommandHandler("frost", requires_whitelist(cmd_frost)))
 
     # Social Automation
     app.add_handler(CommandHandler("social", requires_whitelist(cmd_social)))
