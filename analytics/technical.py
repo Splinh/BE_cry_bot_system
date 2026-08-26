@@ -301,8 +301,8 @@ class TechnicalAnalyzer:
 
             if supports_below:
                 nearest_support = supports_below[0]
-                # SL = min(ATR-based, nearest support - buffer)
-                sr_sl = nearest_support - atr * 0.2  # Nho duoi support 1 chut
+                # SL = min(ATR-based, nearest support - buffer 0.45 ATR de chong quet rau)
+                sr_sl = nearest_support - atr * 0.45
                 sl = min(atr_sl, sr_sl)  # Lay muc thap hon (an toan hon vi duoi ca support va atr)
                 method_parts.append(f"S/R adjusted: ${sl:.2f}")
             else:
@@ -359,7 +359,8 @@ class TechnicalAnalyzer:
 
             if resistances_above:
                 nearest_resistance = resistances_above[0]
-                sr_sl = nearest_resistance + atr * 0.2
+                # SL = max(ATR-based, nearest resistance + buffer 0.45 ATR de chong quet rau)
+                sr_sl = nearest_resistance + atr * 0.45
                 sl = max(atr_sl, sr_sl)  # Lay muc cao hon (an toan hon vi tren ca resistance va atr)
                 method_parts.append(f"S/R adjusted: ${sl:.2f}")
             else:

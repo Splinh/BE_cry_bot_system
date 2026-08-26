@@ -402,17 +402,19 @@ class TradeEngine:
                     result = self.partial_close(sig_key, current_price, pct_to_close=0.25)
                     if result:
                         pos["runner_mode"] = True
+                        self._update_trailing_sl(sig_key, current_price)
                         closed_trades.append({"key": sig_key, "reason": "TP3_HIT_RUNNER_START", "price": current_price, "pnl": result.get("pnl", 0)})
-                    continue
+                        continue
 
-            # Kiem tra TP2 (chot 25% phan tiep theo)
+            # Kiem tra TP2 (chot 25% phan tiep theo -> tong 50%)
             if tp2 > 0 and closed_pct < 0.50:
                 if (direction == "LONG" and current_price >= tp2) or \
                    (direction == "SHORT" and current_price <= tp2):
                     result = self.partial_close(sig_key, current_price, pct_to_close=0.25)
                     if result:
+                        self._update_trailing_sl(sig_key, current_price)
                         closed_trades.append({"key": sig_key, "reason": "TP2_HIT", "price": current_price, "pnl": result.get("pnl", 0)})
-                    continue
+                        continue
 
             # Kiem tra TP1 (chot 25% dau tien)
             if tp1 > 0 and closed_pct < 0.25:
@@ -420,6 +422,7 @@ class TradeEngine:
                    (direction == "SHORT" and current_price <= tp1):
                     result = self.partial_close(sig_key, current_price, pct_to_close=0.25)
                     if result:
+                        self._update_trailing_sl(sig_key, current_price)
                         closed_trades.append({"key": sig_key, "reason": "TP1_HIT", "price": current_price, "pnl": result.get("pnl", 0)})
 
             # Trailing Stop Loss (Chandelier ATR Trail): dich SL theo peak/trough
@@ -430,10 +433,11 @@ class TradeEngine:
 
     def _update_trailing_sl(self, sig_key: str, current_price: float):
         """
-        Trailing SL (Chandelier ATR Exit): tu dong dich SL de bao ve loi nhuan va giu runner position.
-        - Cap nhat peak_price (LONG) / trough_price (SHORT)
-        - Dich SL theo Chandelier Exit (peak - 2.5*ATR cho Long, trough + 2.5*ATR cho Short)
-        - Khi gia qua TP2 (closed >= 50%) -> khoi khoa Break-Even / TP1
+        Trailing SL (Multi-Stage Profit Lock & Chandelier ATR Runner):
+        - Giai đoạn 0: closed_pct < 0.25 (Chưa chạm TP1) -> Giữ nguyên SL kỹ thuật ban đầu, KHÔNG kéo SL để nến có room thở.
+        - Giai đoạn 1: closed_pct >= 0.25 (Đã chạm TP1) -> Khóa SL về Entry (Hòa vốn / Break-Even).
+        - Giai đoạn 2: closed_pct >= 0.50 (Đã chạm TP2) -> Khóa SL lên TP1 (Khóa một phần lợi nhuận cứng).
+        - Giai đoạn 3: closed_pct >= 0.75 hoặc runner_mode=True (Đã chạm TP3) -> BẬT Chandelier ATR Trailing Stop (peak/trough +- 3.5*ATR) để gồng siêu sóng!
         """
         pos = self.positions.get(sig_key)
         if not pos or not pos.get("trailing_sl", True):
@@ -443,7 +447,9 @@ class TradeEngine:
         entry = pos.get("entry_price", 0)
         sl = pos.get("sl", 0)
         tp1 = pos.get("tp1", 0)
+        tp2 = pos.get("tp2", 0)
         closed_pct = pos.get("closed_pct", 0)
+        runner_mode = pos.get("runner_mode", False)
         atr = pos.get("atr", entry * 0.02)
         if not atr or atr <= 0:
             atr = entry * 0.02
@@ -452,63 +458,79 @@ class TradeEngine:
         if direction == "LONG":
             peak = max(pos.get("peak_price", entry), current_price)
             pos["peak_price"] = round(peak, 4)
-            
-            # Neu da chot 50% (qua TP2) -> Lock Break-Even hoac TP1 làm đáy
-            if closed_pct >= 0.50:
-                base_sl = max(entry, tp1) if tp1 > 0 else entry
-                new_sl = max(new_sl, base_sl)
-            
-            # Chandelier ATR Trailing Stop
-            chandelier_sl = peak - 2.5 * atr
-            if chandelier_sl > new_sl and chandelier_sl < current_price:
-                new_sl = round(chandelier_sl, 4)
+
+            # Giai đoạn 1: Sau TP1 -> Lock Break-Even (Entry)
+            if closed_pct >= 0.25:
+                new_sl = max(new_sl, entry)
+
+            # Giai đoạn 2: Sau TP2 -> Lock TP1
+            if closed_pct >= 0.50 and tp1 > 0:
+                new_sl = max(new_sl, tp1)
+
+            # Giai đoạn 3: Runner Mode (sau TP3) -> Chandelier ATR Trailing Stop 3.5x ATR từ đỉnh cao nhất
+            if runner_mode or closed_pct >= 0.75:
+                chandelier_sl = peak - 3.5 * atr
+                if chandelier_sl > new_sl and chandelier_sl < current_price:
+                    new_sl = round(chandelier_sl, 4)
 
         else:  # SHORT
             trough = min(pos.get("trough_price", entry), current_price)
             pos["trough_price"] = round(trough, 4)
-            
-            if closed_pct >= 0.50:
-                base_sl = min(entry, tp1) if tp1 > 0 else entry
-                new_sl = min(new_sl, base_sl)
-            
-            chandelier_sl = trough + 2.5 * atr
-            if chandelier_sl < new_sl and chandelier_sl > current_price:
-                new_sl = round(chandelier_sl, 4)
+
+            # Giai đoạn 1: Sau TP1 -> Lock Break-Even (Entry)
+            if closed_pct >= 0.25:
+                new_sl = min(new_sl, entry) if new_sl > 0 else entry
+
+            # Giai đoạn 2: Sau TP2 -> Lock TP1
+            if closed_pct >= 0.50 and tp1 > 0:
+                new_sl = min(new_sl, tp1)
+
+            # Giai đoạn 3: Runner Mode (sau TP3) -> Chandelier ATR Trailing Stop 3.5x ATR từ đáy thấp nhất
+            if runner_mode or closed_pct >= 0.75:
+                chandelier_sl = trough + 3.5 * atr
+                if chandelier_sl < new_sl and chandelier_sl > current_price:
+                    new_sl = round(chandelier_sl, 4)
 
         if new_sl != sl:
             pos["sl"] = new_sl
             pos["chandelier_sl"] = new_sl
-            logger.info(f"TRAILING SL (Chandelier) [{sig_key}]: {sl:.4f} -> {new_sl:.4f}")
+            logger.info(f"TRAILING SL [{sig_key}]: {sl:.4f} -> {new_sl:.4f} (Stage closed_pct={closed_pct:.0%})")
             self._save_data()
 
     def calculate_position_size(self, entry_price: float, stop_loss: float, leverage: int = 1) -> float:
         """
-        Tinh toan khoi luong Giao dich (USDT Size) dua theo rui ro va leverage.
-        Cong thuc: Risk_Amount = Balance * Risk%
-                   SL_Percent = abs(Entry - SL) / Entry
-                   Position_Size = Risk_Amount / SL_Percent
+        Tính toán khối lượng giao dịch (USDT Size) dựa theo rủi ro, leverage và margin chuẩn hóa.
+        - Tránh phóng đại size khi SL quá gần (đặt sàn sl_pct_calc >= 1.5%).
+        - Khống chế margin cho 1 lệnh trong khoảng an toàn: 3% - 10% balance.
         """
         if entry_price <= 0 or stop_loss <= 0 or entry_price == stop_loss:
             return 0.0
 
-        risk_amount = self.balance * self.risk_per_trade
-        sl_pct = abs(entry_price - stop_loss) / entry_price
+        risk_amount = self.balance * self.risk_per_trade  # 2% balance
+        raw_sl_pct = abs(entry_price - stop_loss) / entry_price
         
-        # Tranh chia cho 0 hoac SL qua be
-        if sl_pct < 0.001:
-            sl_pct = 0.001
+        # Đặt sàn SL% tối thiểu là 1.5% để tính size, tránh việc SL 0.2% làm bùng nổ size lên $8k-$10k
+        sl_pct_for_size = max(raw_sl_pct, 0.015)
 
-        pos_size = risk_amount / sl_pct
+        # Size theo risk formula
+        pos_size = risk_amount / sl_pct_for_size
+
+        # Chuẩn hóa Margin mỗi lệnh: tối thiểu 3% balance, tối đa max_margin_per_trade_pct (10%)
+        target_min_margin = self.balance * 0.03
+        target_max_margin = self.balance * self.max_margin_per_trade_pct
         
-        # Gioi han margin su dung tren 1 lenh la 20% tai khoan (tranh qua muc)
-        # Margin = pos_size / leverage -> pos_size = Margin * leverage
-        max_margin = self.balance * 0.2
-        max_size = max_margin * leverage
-        
-        # Dam bao margin luon be hon so du kha dung
+        target_min_size = target_min_margin * leverage
+        target_max_size = target_max_margin * leverage
+
+        pos_size = max(pos_size, target_min_size)
+        pos_size = min(pos_size, target_max_size)
+
+        # Đảm bảo không vượt quá giới hạn USD tuyệt đối và số dư khả dụng
+        max_usd_cap = self.max_margin_per_trade_usd * leverage
+        pos_size = min(pos_size, max_usd_cap)
+
         max_possible_size = (self.balance * 0.95) * leverage
-        calculated_size = min(pos_size, max_size)
-        return min(calculated_size, max_possible_size)
+        return round(min(pos_size, max_possible_size), 2)
 
     def open_manual_position(self, coin: str, direction: str, usdt_size: float,
                              leverage: int = 1, current_price: float = 0,
