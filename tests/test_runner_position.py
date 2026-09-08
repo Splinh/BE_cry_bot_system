@@ -69,12 +69,13 @@ async def test_runner_position_and_chandelier():
     assert pos["status"] == "OPEN", "Position should be OPEN initially"
     assert pos["closed_pct"] == 0.0, "Initial closed_pct should be 0.0"
 
-    # Price moves slightly before TP1 ($60,500) -> SL should NOT be modified prematurely!
+    # Price moves slightly before TP1 ($60,500) -> Chandelier trail active right from open
+    # SL = peak (60500) - 3.5 * ATR (500) = 58750 (improve-only from initial 58500)
     prices_pre_tp1 = {"BTCUSDT": {"price": 60500.0}}
     te.check_sl_tp(prices_pre_tp1)
     pos_pre_tp1 = te.positions[sig_key]
-    assert pos_pre_tp1["sl"] == 58500.0, f"Expected initial SL (58500) preserved before TP1, got {pos_pre_tp1['sl']}"
-    print("Success: SL preserved with full breathing room before TP1.")
+    assert pos_pre_tp1["sl"] == 58750.0, f"Expected Chandelier SL (58750 = 60500 - 3.5*500) before TP1, got {pos_pre_tp1['sl']}"
+    print("Success: Chandelier trail locked in profits early (58500 -> 58750) before TP1.")
 
     # Price hits TP1 ($61,200) -> 25% closed & SL locked to Break-Even (Entry $60,000)
     prices_tp1 = {"BTCUSDT": {"price": 61250.0}}
@@ -130,12 +131,26 @@ async def test_runner_position_and_chandelier():
     print(f"Close SL (0.2%): Size = ${size_close_sl:,.2f}, Margin = ${margin_close_sl:,.2f}")
     assert margin_close_sl <= te.balance * 0.10 + 1e-5, f"Margin should not exceed 10% of balance, got {margin_close_sl}"
 
-    # Test wider SL (e.g. SL 3% away: 60000 -> 58200)
+    # Test wider SL (e.g. SL 3% away: 60000 -> 58200): size theo risk formula
     size_wide_sl = te.calculate_position_size(entry_price=60000.0, stop_loss=58200.0, leverage=10)
     margin_wide_sl = size_wide_sl / 10
     print(f"Wide SL (3.0%): Size = ${size_wide_sl:,.2f}, Margin = ${margin_wide_sl:,.2f}")
-    assert margin_wide_sl >= te.balance * 0.03 - 1e-5, f"Margin should be at least 3% of balance, got {margin_wide_sl}"
+    # Invariant: loss tai SL (size * sl_pct) <= balance * risk_per_trade
+    loss_at_sl = size_wide_sl * 0.03
+    assert loss_at_sl <= te.balance * te.risk_per_trade + 0.01, f"Loss at SL (${loss_at_sl:.2f}) exceeds risk budget (${te.balance * te.risk_per_trade:.2f})"
     print("Success: Position sizing is well balanced across tight and wide stop losses.")
+
+    # 5. Test Risk Invariant: loss-at-SL <= balance * risk_per_trade
+    print("\n--- Test Risk Invariant (loss at SL <= risk_per_trade * balance) ---")
+    for entry_px, sl_px, lev in [(60000.0, 59880.0, 10), (60000.0, 58200.0, 10), (60000.0, 58500.0, 1)]:
+        size = te.calculate_position_size(entry_px, sl_px, lev)
+        raw_sl_pct = abs(entry_px - sl_px) / entry_px
+        loss_at_sl = size * raw_sl_pct
+        max_risk = te.balance * te.risk_per_trade
+        # Tolerance +0.01 de chiu dung rounding 2 chu so thap phan cua size (vd 2000/0.03 = 66666.67)
+        assert loss_at_sl <= max_risk + 0.01, f"Loss at SL ${loss_at_sl:.2f} exceeds risk ${max_risk:.2f} (entry={entry_px}, sl={sl_px}, lev={lev})"
+        print(f"OK: entry={entry_px}, sl={sl_px}, lev={lev} -> size=${size:,.2f}, loss@SL=${loss_at_sl:.2f} <= ${max_risk:.2f}")
+    print("Success: Risk invariant holds across tight and wide stops.")
 
     print("\nALL RUNNER POSITION AND CHANDELIER TESTS PASSED SUCCESSFULLY!")
 

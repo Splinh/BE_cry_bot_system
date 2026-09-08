@@ -54,6 +54,11 @@ class Config:
     MAX_DAILY_LOSS_USD: float = float(os.getenv("MAX_DAILY_LOSS_USD", "1000"))  # lo toi da/ngay -> khoa mo lenh
     MAX_DAILY_LOSS_PCT: float = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.10"))  # hoac 10% balance dau ngay
 
+    # --- Trailing Stop & Position Sizing (tuning) ---
+    SL_PCT_FLOOR: float = float(os.getenv("SL_PCT_FLOOR", "0.015"))            # san SL% toi thieu khi tinh size
+    CHANDELIER_ATR_MULTIPLIER: float = float(os.getenv("CHANDELIER_ATR_MULTIPLIER", "3.5"))  # he so ATR Chandelier trail
+    ATR_FALLBACK_PCT: float = float(os.getenv("ATR_FALLBACK_PCT", "0.02"))     # ATR fallback = 2% gia entry
+
     # --- Trend Filter ---
     ENABLE_TREND_FILTER: bool = os.getenv("ENABLE_TREND_FILTER", "true").lower() == "true"
 

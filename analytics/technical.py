@@ -318,6 +318,12 @@ class TechnicalAnalyzer:
                 sl = price - min_sl_distance
                 method_parts.append(f"Min-guard SL: ${sl:.2f}")
 
+            # === MAX DISTANCE GUARD cho SL (SL xa qua -> thu hep ve 3x atr_distance) ===
+            max_sl_distance = atr_distance * 3.0
+            if price - sl > max_sl_distance:
+                sl = price - max_sl_distance
+                method_parts.append(f"Max-guard SL: ${sl:.2f}")
+
             # === TP cho LONG ===
             # Tim resistance tren gia
             resistances_above = sorted(
@@ -374,6 +380,12 @@ class TechnicalAnalyzer:
             if abs(sl - price) < min_sl_distance:
                 sl = price + min_sl_distance
                 method_parts.append(f"Min-guard SL: ${sl:.2f}")
+
+            # === MAX DISTANCE GUARD cho SL (SL xa qua -> thu hep ve 3x atr_distance) ===
+            max_sl_distance = atr_distance * 3.0
+            if sl - price > max_sl_distance:
+                sl = price + max_sl_distance
+                method_parts.append(f"Max-guard SL: ${sl:.2f}")
 
             # === TP cho SHORT ===
             supports_below = sorted(

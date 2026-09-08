@@ -339,7 +339,7 @@ def get_trading():
             pos["liq_price"] = p.get("liq_price", 0.0)
             pos["fees_paid"] = p.get("fees_paid", 0.0)
             pos["runner_mode"] = p.get("runner_mode", False)
-            pos["chandelier_sl"] = p.get("chandelier_sl", p.get("sl", 0.0))
+            pos["chandelier_sl"] = p.get("sl", 0.0)
             pos["peak_price"] = p.get("peak_price", p.get("entry_price", 0.0))
             pos["trough_price"] = p.get("trough_price", p.get("entry_price", 0.0))
             total_unrealized += pnl

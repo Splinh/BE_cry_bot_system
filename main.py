@@ -1225,6 +1225,7 @@ async def _analyze_and_signal(update, token: str, signal_type: str):
             "leverage": leverage,
             "rating": rating,
             "tf": "1h",
+            "atr": smart_levels.get("atr", 0) if (smart_levels and not smart_levels.get("error")) else 0,
         })
 
         await update.message.reply_text(

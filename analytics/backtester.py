@@ -11,6 +11,8 @@ from loguru import logger
 import pandas as pd
 import numpy as np
 
+from core.config import Config
+
 
 class BacktestEngine:
     """
@@ -349,17 +351,15 @@ class BacktestEngine:
                         tp2 = price * (1 - tp2_pct)
                         tp3 = price * (1 - tp3_pct)
 
-                    # Tinh position size (risk-based) va leverage
+                    # Tinh position size (risk-based) — sync voi TradeEngine.calculate_position_size
                     risk_amount = balance * risk_per_trade
-                    if sl_pct > 0:
-                        pos_size = risk_amount / sl_pct
-                    else:
-                        pos_size = risk_amount
-                    
-                    # Gioi han margin su dung tren 1 lenh la 20% tai khoan (tranh qua muc)
-                    max_margin = balance * 0.2
-                    max_size = max_margin * leverage
-                    pos_size = min(pos_size, max_size)
+                    # San SL% toi thieu khi tinh size (tranh SL qua gan lam bung no size)
+                    sl_pct_for_size = max(sl_pct, Config.SL_PCT_FLOOR)
+                    pos_size = risk_amount / sl_pct_for_size
+
+                    # Khong che margin/lenh: min(gioi han USD tuyet doi, % balance)
+                    margin_cap = min(Config.MAX_MARGIN_PER_TRADE_USD, balance * Config.MAX_MARGIN_PER_TRADE_PCT)
+                    pos_size = min(pos_size, margin_cap * leverage)
 
                     # Dam bao margin luon be hon so du kha dung
                     max_possible_size = (balance * 0.95) * leverage

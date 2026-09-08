@@ -263,6 +263,7 @@ class SignalScanner:
                                                     "leverage": trade_leverage,
                                                     "rating": rating,
                                                     "tf": tf,
+                                                    "atr": smart_levels.get("atr", 0) if (smart_levels and "error" not in smart_levels) else 0,
                                                 })
                                         else:
                                             logger.info(f"⏭️ [Auto Trade] Bỏ qua {coin_name}_{tf} vì rating={rating} < 4 sao")

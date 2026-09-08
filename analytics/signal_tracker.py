@@ -214,8 +214,8 @@ class SignalTracker:
                     "chat_id": pos.get("chat_id") or self.notifier.chat_id,
                     "leverage": pos.get("leverage", 10),
                     "tf": pos.get("tf", "1h"),
-                    "tp1_hit": closed_pct >= 0.3,
-                    "tp2_hit": closed_pct >= 0.6,
+                    "tp1_hit": closed_pct >= 0.25,
+                    "tp2_hit": closed_pct >= 0.50,
                     "tp3_hit": False,
                     "sl_hit": False,
                     "created_at": pos.get("open_time", datetime.now().isoformat())

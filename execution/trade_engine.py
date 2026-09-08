@@ -53,6 +53,9 @@ class TradeEngine:
         self.max_open_positions: int = Config.MAX_OPEN_POSITIONS
         self.max_daily_loss_usd: float = Config.MAX_DAILY_LOSS_USD
         self.max_daily_loss_pct: float = Config.MAX_DAILY_LOSS_PCT
+        self.sl_pct_floor: float = Config.SL_PCT_FLOOR
+        self.chandelier_atr_multiplier: float = Config.CHANDELIER_ATR_MULTIPLIER
+        self.atr_fallback_pct: float = Config.ATR_FALLBACK_PCT
 
         # Theo doi lo/lai trong ngay de kich hoat khoa giao dich (circuit breaker)
         self.daily_date: str = ""          # YYYY-MM-DD cua phien hien tai
@@ -424,6 +427,7 @@ class TradeEngine:
                     if result:
                         self._update_trailing_sl(sig_key, current_price)
                         closed_trades.append({"key": sig_key, "reason": "TP1_HIT", "price": current_price, "pnl": result.get("pnl", 0)})
+                        continue
 
             # Trailing Stop Loss (Chandelier ATR Trail): dich SL theo peak/trough
             if sig_key in self.positions:
@@ -433,75 +437,79 @@ class TradeEngine:
 
     def _update_trailing_sl(self, sig_key: str, current_price: float):
         """
-        Trailing SL (Multi-Stage Profit Lock & Chandelier ATR Runner):
-        - Giai đoạn 0: closed_pct < 0.25 (Chưa chạm TP1) -> Giữ nguyên SL kỹ thuật ban đầu, KHÔNG kéo SL để nến có room thở.
+        Trailing SL (Chandelier ATR Trail + Multi-Stage Profit Lock):
+        - Chandelier (luôn active, improve-only): SL = peak/trough -+ CHANDELIER_ATR_MULTIPLIER * ATR,
+          chỉ kéo khi mức mới TỐT HƠN SL hiện tại và còn nằm đúng phía so với giá hiện tại.
         - Giai đoạn 1: closed_pct >= 0.25 (Đã chạm TP1) -> Khóa SL về Entry (Hòa vốn / Break-Even).
         - Giai đoạn 2: closed_pct >= 0.50 (Đã chạm TP2) -> Khóa SL lên TP1 (Khóa một phần lợi nhuận cứng).
-        - Giai đoạn 3: closed_pct >= 0.75 hoặc runner_mode=True (Đã chạm TP3) -> BẬT Chandelier ATR Trailing Stop (peak/trough +- 3.5*ATR) để gồng siêu sóng!
+        - Giai đoạn 3: closed_pct >= 0.75 hoặc runner_mode=True (Đã chạm TP3) -> Runner tiếp tục chạy bằng Chandelier (đã active từ đầu).
         """
         pos = self.positions.get(sig_key)
         if not pos or not pos.get("trailing_sl", True):
+            return
+
+        if current_price <= 0:
             return
 
         direction = pos.get("direction", "LONG")
         entry = pos.get("entry_price", 0)
         sl = pos.get("sl", 0)
         tp1 = pos.get("tp1", 0)
-        tp2 = pos.get("tp2", 0)
         closed_pct = pos.get("closed_pct", 0)
-        runner_mode = pos.get("runner_mode", False)
-        atr = pos.get("atr", entry * 0.02)
+
+        # ATR từ signal/Smart Levels; fallback = ATR_FALLBACK_PCT * entry
+        atr = pos.get("atr", 0)
         if not atr or atr <= 0:
-            atr = entry * 0.02
+            atr = entry * self.atr_fallback_pct if entry > 0 else 0
+        if atr <= 0:
+            return
 
         new_sl = sl
         if direction == "LONG":
             peak = max(pos.get("peak_price", entry), current_price)
             pos["peak_price"] = round(peak, 4)
 
-            # Giai đoạn 1: Sau TP1 -> Lock Break-Even (Entry)
-            if closed_pct >= 0.25:
+            # Giai đoạn 1: Sau TP1 -> Lock Break-Even (Entry), chỉ kéo khi entry còn dưới giá hiện tại
+            if closed_pct >= 0.25 and entry > 0 and entry < current_price:
                 new_sl = max(new_sl, entry)
 
-            # Giai đoạn 2: Sau TP2 -> Lock TP1
-            if closed_pct >= 0.50 and tp1 > 0:
+            # Giai đoạn 2: Sau TP2 -> Lock TP1, chỉ kéo khi tp1 còn dưới giá hiện tại
+            if closed_pct >= 0.50 and tp1 > 0 and tp1 < current_price:
                 new_sl = max(new_sl, tp1)
 
-            # Giai đoạn 3: Runner Mode (sau TP3) -> Chandelier ATR Trailing Stop 3.5x ATR từ đỉnh cao nhất
-            if runner_mode or closed_pct >= 0.75:
-                chandelier_sl = peak - 3.5 * atr
-                if chandelier_sl > new_sl and chandelier_sl < current_price:
-                    new_sl = round(chandelier_sl, 4)
+            # Chandelier ATR Trailing Stop (luôn active, improve-only) từ đỉnh cao nhất
+            chandelier_sl = peak - self.chandelier_atr_multiplier * atr
+            if chandelier_sl > new_sl and chandelier_sl < current_price:
+                new_sl = round(chandelier_sl, 4)
 
         else:  # SHORT
             trough = min(pos.get("trough_price", entry), current_price)
             pos["trough_price"] = round(trough, 4)
 
-            # Giai đoạn 1: Sau TP1 -> Lock Break-Even (Entry)
-            if closed_pct >= 0.25:
+            # Giai đoạn 1: Sau TP1 -> Lock Break-Even (Entry), chỉ kéo khi entry còn trên giá hiện tại
+            if closed_pct >= 0.25 and entry > 0 and entry > current_price:
                 new_sl = min(new_sl, entry) if new_sl > 0 else entry
 
-            # Giai đoạn 2: Sau TP2 -> Lock TP1
-            if closed_pct >= 0.50 and tp1 > 0:
-                new_sl = min(new_sl, tp1)
+            # Giai đoạn 2: Sau TP2 -> Lock TP1, chỉ kéo khi tp1 còn trên giá hiện tại
+            if closed_pct >= 0.50 and tp1 > 0 and tp1 > current_price:
+                new_sl = min(new_sl, tp1) if new_sl > 0 else tp1
 
-            # Giai đoạn 3: Runner Mode (sau TP3) -> Chandelier ATR Trailing Stop 3.5x ATR từ đáy thấp nhất
-            if runner_mode or closed_pct >= 0.75:
-                chandelier_sl = trough + 3.5 * atr
-                if chandelier_sl < new_sl and chandelier_sl > current_price:
-                    new_sl = round(chandelier_sl, 4)
+            # Chandelier ATR Trailing Stop (luôn active, improve-only) từ đáy thấp nhất
+            chandelier_sl = trough + self.chandelier_atr_multiplier * atr
+            if (new_sl <= 0 or chandelier_sl < new_sl) and chandelier_sl > current_price:
+                new_sl = round(chandelier_sl, 4)
 
         if new_sl != sl:
             pos["sl"] = new_sl
-            pos["chandelier_sl"] = new_sl
             logger.info(f"TRAILING SL [{sig_key}]: {sl:.4f} -> {new_sl:.4f} (Stage closed_pct={closed_pct:.0%})")
             self._save_data()
 
     def calculate_position_size(self, entry_price: float, stop_loss: float, leverage: int = 1) -> float:
         """
         Tính toán khối lượng giao dịch (USDT Size) dựa theo rủi ro, leverage và margin chuẩn hóa.
-        - Tránh phóng đại size khi SL quá gần (đặt sàn sl_pct_calc >= 1.5%).
-        - Khống chế margin cho 1 lệnh trong khoảng an toàn: 3% - 10% balance.
+        - Invariant: loss tại SL (size * raw_sl_pct) <= balance * risk_per_trade.
+        - Tránh phóng đại size khi SL quá gần (sàn SL% = SL_PCT_FLOOR khi tính size).
+        - Margin mỗi lệnh bị khống chế bởi min(max_margin_per_trade_usd, balance * max_margin_per_trade_pct).
         """
         if entry_price <= 0 or stop_loss <= 0 or entry_price == stop_loss:
             return 0.0
@@ -509,26 +517,18 @@ class TradeEngine:
         risk_amount = self.balance * self.risk_per_trade  # 2% balance
         raw_sl_pct = abs(entry_price - stop_loss) / entry_price
         
-        # Đặt sàn SL% tối thiểu là 1.5% để tính size, tránh việc SL 0.2% làm bùng nổ size lên $8k-$10k
-        sl_pct_for_size = max(raw_sl_pct, 0.015)
+        # Sàn SL% tối thiểu (SL_PCT_FLOOR) khi tính size, tránh SL quá gần làm bùng nổ size
+        sl_pct_for_size = max(raw_sl_pct, self.sl_pct_floor)
 
         # Size theo risk formula
         pos_size = risk_amount / sl_pct_for_size
 
-        # Chuẩn hóa Margin mỗi lệnh: tối thiểu 3% balance, tối đa max_margin_per_trade_pct (10%)
-        target_min_margin = self.balance * 0.03
-        target_max_margin = self.balance * self.max_margin_per_trade_pct
-        
-        target_min_size = target_min_margin * leverage
-        target_max_size = target_max_margin * leverage
+        # Margin cap mỗi lệnh: min(giới hạn USD tuyệt đối, % balance) — đồng bộ can_open_position.
+        # Cap chỉ GIẢM size; đã bỏ sàn min-margin 3% để giữ invariant loss-at-SL <= risk_per_trade.
+        margin_cap = min(self.max_margin_per_trade_usd, self.balance * self.max_margin_per_trade_pct)
+        pos_size = min(pos_size, margin_cap * leverage)
 
-        pos_size = max(pos_size, target_min_size)
-        pos_size = min(pos_size, target_max_size)
-
-        # Đảm bảo không vượt quá giới hạn USD tuyệt đối và số dư khả dụng
-        max_usd_cap = self.max_margin_per_trade_usd * leverage
-        pos_size = min(pos_size, max_usd_cap)
-
+        # Đảm bảo không vượt quá số dư khả dụng
         max_possible_size = (self.balance * 0.95) * leverage
         return round(min(pos_size, max_possible_size), 2)
 
@@ -626,6 +626,13 @@ class TradeEngine:
                 pos["tp1"] = round(smart_levels["tp1"], 4)
                 pos["tp2"] = round(smart_levels["tp2"], 4)
                 pos["tp3"] = round(smart_levels["tp3"], 4)
+                pos["atr"] = smart_levels.get("atr", 0) or pos.get("atr", 0)
+
+            # Refresh peak/trough theo gia moi sau khi DCA binh quan
+            if direction.upper() == "LONG":
+                pos["peak_price"] = round(max(pos.get("peak_price", avg_entry), current_price), 4)
+            else:
+                pos["trough_price"] = round(min(pos.get("trough_price", avg_entry), current_price), 4)
             
             if not is_live:
                 self.balance -= (margin_required + new_open_fee)
@@ -723,7 +730,6 @@ class TradeEngine:
             "peak_price": current_price,
             "trough_price": current_price,
             "runner_mode": False,
-            "chandelier_sl": round(sl, 4),
             "atr": smart_levels.get("atr", 0) if smart_levels else 0,
         }
 
@@ -810,9 +816,16 @@ class TradeEngine:
                         and pos_status != "CLOSED" and pos_live == is_live 
                         and pos_dir != direction):
                     # Vị thế đối nghịch trên đồng coin tương quan. Áp dụng phòng vệ:
-                    # a) Dời SL về Entry
+                    # a) Dời SL về Entry (chỉ khi entry hợp lệ và tốt hơn SL hiện tại)
                     entry_p = pos_data.get("entry_price", 0)
-                    pos_data["sl"] = entry_p
+                    cur_sl = pos_data.get("sl", 0)
+                    if entry_p > 0:
+                        if pos_dir == "LONG":
+                            if cur_sl <= 0 or entry_p > cur_sl:
+                                pos_data["sl"] = entry_p
+                        else:  # SHORT
+                            if cur_sl <= 0 or entry_p < cur_sl:
+                                pos_data["sl"] = entry_p
                     
                     # b) Chốt lời / Giảm vị thế 50%
                     opp_price = self.get_current_price_sync(pos_coin) or entry_p
@@ -915,7 +928,6 @@ class TradeEngine:
             "peak_price": entry,
             "trough_price": entry,
             "runner_mode": False,
-            "chandelier_sl": round(sl, 4),
             "atr": signal.get("atr", 0),
         }
 
