@@ -48,11 +48,12 @@ ctx = {
     "security": None,
     "wallet_manager": None,
     "price_monitor": None,
+    "chat_engine": None,
 }
 
 def inject_instances(trade_engine, tele_mgr, twit_mgr, system_status,
                      signal_tracker=None, listing_scanner=None, security=None,
-                     wallet_manager=None, price_monitor=None):
+                     wallet_manager=None, price_monitor=None, chat_engine=None):
     ctx["trade_engine"] = trade_engine
     ctx["telegram_manager"] = tele_mgr
     ctx["twitter_manager"] = twit_mgr
@@ -62,6 +63,7 @@ def inject_instances(trade_engine, tele_mgr, twit_mgr, system_status,
     ctx["security"] = security
     ctx["wallet_manager"] = wallet_manager
     ctx["price_monitor"] = price_monitor
+    ctx["chat_engine"] = chat_engine
 
 # ============================================
 #  OVERVIEW
@@ -1771,6 +1773,43 @@ async def start_dca_scheduler():
                 logger.error(f"DCA scheduler error: {e}")
             await asyncio.sleep(30)  # Check moi 30s
     asyncio.create_task(dca_loop())
+
+# ============================================
+#  AI CHATBOX (Tro ly AI - OmniRouter)
+# ============================================
+
+class AIAskRequest(BaseModel):
+    question: str
+    chat_id: int = 0
+
+@app.post("/api/ai/ask")
+async def ai_ask(req: AIAskRequest):
+    """Hoi tro ly AI - tra loi kem du lieu thi truong thuc."""
+    engine = ctx.get("chat_engine")
+    if engine is None:
+        return {"error": "Chat engine chua duoc khoi tao (chay main.py)"}
+    question = req.question.strip()
+    if not question:
+        return {"error": "Thieu cau hoi"}
+    try:
+        result = await engine.ask(question, chat_id=req.chat_id)
+        return {
+            "answer": result.get("answer", ""),
+            "coin": result.get("coin"),
+            "intent": result.get("intent"),
+            "used_fallback": result.get("used_fallback", False),
+            "model": result.get("model"),
+            "latency_ms": result.get("latency_ms"),
+        }
+    except Exception as e:
+        logger.error(f"API /api/ai/ask error: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/ai/status")
+async def ai_status():
+    """Trang thai cau hinh LLM (provider, model, so request)."""
+    from ai.llm_client import llm_client
+    return llm_client.status()
 
 # ============================================
 #  SERVER

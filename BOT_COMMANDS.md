@@ -1,5 +1,18 @@
 # 🤖 Crypto Bot - Danh Sách Lệnh
 
+## 🤖 Trợ Lý AI *(MỚI)*
+
+| Lệnh | Mô tả |
+| ---- | ----- |
+| `/ask [câu hỏi]` | Hỏi Trợ lý AI về xu hướng, vào lệnh, tin tức (VD: `/ask xu hướng BTC thế nào?`) |
+| `/chat reset` | Xóa lịch sử hội thoại với AI, bắt đầu phiên mới |
+| `/model` | Xem model AI đang dùng. `/model [tên]` đổi model (admin) |
+
+> 🧠 AI trả lời dựa trên **dữ liệu thật** (giá realtime + tín hiệu 4h/1d + Fear & Greed + tin tức) qua API OmniRouter. Cần điền `OMNIROUTER_API_KEY` trong `.env`.
+> Alias: `/ai`, `/hoi` cũng giống `/ask`.
+
+---
+
 ## 📊 Phân Tích & Tín Hiệu
 
 | Lệnh                 | Mô tả                                               |
@@ -194,4 +207,12 @@ Gõ BTC → xem báo cáo → /spot BTC hoặc /futures BTC → bot theo dõi TP
 ```
 /alert BTC 100000 above → đặt cảnh báo → bot thông báo khi BTC vượt $100k
 /alerts → xem danh sách → /alerts del 1 → xóa alert #1
+```
+
+### Trợ Lý AI:
+
+```
+/ask xu hướng BTC hôm nay thế nào? → AI tổng hợp giá + kỹ thuật + tin tức → trả lời tức thì
+/ask nên long SOL ngay không? → AI phân tích + khuyến nghị thận trọng
+/chat reset → xóa lịch sử → hỏi phiên mới
 ```

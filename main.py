@@ -13,10 +13,11 @@ import html
 import sys
 import os
 import re
+from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from loguru import logger
 
@@ -516,44 +517,33 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👇 Chọn một chức năng nhanh dưới đây để bắt đầu:"
     )
 
-    if chat_type == "private":
-        reply_keyboard = [
-            ["📊 Quét Coins", "📈 Ví Giả Lập"],
-            ["💼 Quản Lý Ví", "🛡️ Bảo Mật"],
-            ["📰 Tin Tức", "📡 Tín Hiệu Active"],
-            ["🔔 Cảnh Báo", "📖 Hướng Dẫn"],
-            ["🤖 Menu Chính"]
+    # Luon dung InlineKeyboard (chi hien khi user bam, khong chiem man hinh dt nho)
+    keyboard = [
+        [
+            InlineKeyboardButton("📊 Quét Top Coins", callback_data="menu_scan"),
+            InlineKeyboardButton("📈 Ví Giả Lập", callback_data="menu_paper"),
+        ],
+        [
+            InlineKeyboardButton("💼 Quản Lý Ví", callback_data="menu_wallets"),
+            InlineKeyboardButton("🛡️ Bảo Mật", callback_data="menu_security"),
+        ],
+        [
+            InlineKeyboardButton("📰 Tin Tức Crypto", callback_data="menu_news"),
+            InlineKeyboardButton("🔔 Cảnh Báo Giá", callback_data="menu_alerts"),
+        ],
+        [
+            InlineKeyboardButton("📡 Tín Hiệu Active", callback_data="menu_signals"),
+            InlineKeyboardButton("🤖 Hỏi AI", callback_data="menu_ask"),
+        ],
+        [
+            InlineKeyboardButton("📖 Hướng Dẫn", callback_data="menu_help"),
         ]
-        reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
-    else:
-        keyboard = [
-            [
-                InlineKeyboardButton("📊 Quét Top Coins", callback_data="menu_scan"),
-                InlineKeyboardButton("📈 Ví Giả Lập", callback_data="menu_paper"),
-            ],
-            [
-                InlineKeyboardButton("💼 Quản Lý Ví", callback_data="menu_wallets"),
-                InlineKeyboardButton("🛡️ Bảo Mật", callback_data="menu_security"),
-            ],
-            [
-                InlineKeyboardButton("📰 Tin Tức Crypto", callback_data="menu_news"),
-                InlineKeyboardButton("🔔 Cảnh Báo Giá", callback_data="menu_alerts"),
-            ],
-            [
-                InlineKeyboardButton("📡 Tín Hiệu Active", callback_data="menu_signals"),
-                InlineKeyboardButton("📖 Hướng Dẫn", callback_data="menu_help"),
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
     if is_callback:
         await update.callback_query.answer()
-        # Callback query can only edit Inline keyboards
-        if chat_type != "private":
-            await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="HTML")
-        else:
-            # For private chat, send a new message with the reply keyboard
-            await reply_target.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
+        await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="HTML")
     else:
         await reply_target.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
 
@@ -2539,6 +2529,172 @@ async def cmd_retweet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop.run_in_executor(None, twitter_manager.raid_tweet, tweet_id)
 
 
+# ============================================
+#  AI CHATBOX COMMANDS (Tro ly AI - OmniRouter)
+# ============================================
+
+from ai.chat_engine import ChatEngine
+from ai.llm_client import llm_client
+
+chat_engine = ChatEngine()
+
+# Throttle: chat_id -> timestamp cac cau hoi gan nhat
+_ask_timestamps: dict[int, list[float]] = {}
+
+
+def _check_ask_throttle(chat_id: int) -> Optional[str]:
+    """Gioi han so cau hoi /ask. Tra None neu cho phep, nguoc lai tra message loi."""
+    import time as _time
+    now = _time.time()
+    window = [t for t in _ask_timestamps.get(chat_id, []) if now - t < 60]
+    if len(window) >= Config.AI_RATE_LIMIT_PER_MIN:
+        return f"\u23f3 Ban da hoi nhanh qua! Toi da {Config.AI_RATE_LIMIT_PER_MIN} cau/phut. Thu lai sau it giay."
+    window.append(now)
+    _ask_timestamps[chat_id] = window
+    return None
+
+
+async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lenh /ask [cau hoi] - Hoi tro ly AI ve xu huong thi truong."""
+    if not update.message:
+        return
+    question = " ".join(context.args).strip() if context.args else ""
+    if not question:
+        msg = (
+            "\U0001F916 <b>TRỢ LÝ AI - HỎI ĐÁP TỨC THÌ</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Gõ: <code>/ask [câu hỏi của bạn]</code>\n\n"
+            "<b>Ví dụ:</b>\n"
+            "\u25fd <code>/ask xu hướng BTC hôm nay thế nào?</code>\n"
+            "\u25fd <code>/ask nên long SOL ngay bây giờ không?</code>\n"
+            "\u25fd <code>/ask tin gì nóng về ETH?</code>\n"
+            "\u25fd <code>/ask thị trường chung hôm nay ra sao?</code>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "\U0001F9E9 Khác: <code>/chat reset</code> xóa lịch sử · <code>/model</code> xem model AI"
+        )
+        keyboard = [
+            [InlineKeyboardButton("\U0001F4C8 Xu hướng BTC", callback_data="menu_ask_btc")],
+            [InlineKeyboardButton("\U0001F30D Thị trường tổng quan", callback_data="menu_ask_trend")],
+            [InlineKeyboardButton("\U0001F4F0 Tin tức nóng", callback_data="menu_ask_news")],
+            [InlineKeyboardButton("\U0001F519 Quay lại Menu", callback_data="menu_start")],
+        ]
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return
+
+    # Throttle rieng cho /ask
+    throttle_msg = _check_ask_throttle(update.effective_chat.id)
+    if throttle_msg:
+        await update.message.reply_text(throttle_msg)
+        return
+
+    await process_ask_question(update, context, question)
+
+
+async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE, question: str):
+    """Xu ly 1 cau hoi AI (dung chung cho /ask va callback quick-ask)."""
+    chat_id = update.effective_chat.id
+    reply_target = update.message if update.message else update.callback_query.message
+
+    # Typing indicator song song voi viec xu ly
+    stop_event = asyncio.Event()
+    typing_task = asyncio.create_task(_keep_typing_wrapper(context, chat_id, stop_event))
+
+    try:
+        result = await chat_engine.ask(question, chat_id)
+    finally:
+        stop_event.set()
+        typing_task.cancel()
+
+    answer = result.get("answer", "")
+    if not answer:
+        answer = "\U0001F916 Tro ly AI khong tra loi duoc. Thu lai sau."
+
+    # Telegram gioi han 4096 ky cu/tin -> chia nho
+    for i in range(0, len(answer), 4000):
+        await reply_target.reply_text(answer[i:i + 4000], parse_mode="HTML")
+
+    logger.info(f"AI ask ok: coin={result.get('coin')} intent={result.get('intent')} "
+                f"fallback={result.get('used_fallback')} latency={result.get('latency_ms')}ms")
+
+
+async def _keep_typing_wrapper(context, chat_id: int, stop_event: asyncio.Event):
+    """Refresh typing indicator moi 4s cho den khi stop_event duoc set."""
+    while not stop_event.is_set():
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=4.0)
+        except asyncio.TimeoutError:
+            continue
+
+
+async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lenh /chat reset - Xoa lich su hoi danh voi tro ly AI."""
+    if not update.message:
+        return
+    chat_id = update.effective_chat.id
+
+    if context.args and context.args[0].lower() == "reset":
+        chat_engine.reset_history(chat_id)
+        await update.message.reply_text(
+            "\U0001F5D1 Đã xóa lịch sử hội thoại với Trợ lý AI. Bắt đầu phiên mới!"
+        )
+        return
+
+    turns = chat_engine.get_history_len(chat_id)
+    await update.message.reply_text(
+        "\U0001F916 <b>PHIÊN HỎI ĐÁP AI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"\U0001F4DC Lịch sử hiện tại: <b>{turns // 2}</b> lượt hội thoại\n"
+        f"\U0001F9E9 Model: <code>{llm_client.get_model()}</code>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "\u25fd <code>/chat reset</code>: Xóa lịch sử bắt đầu phiên mới",
+        parse_mode="HTML",
+    )
+
+
+async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lenh /model - Xem model AI hien tai. /model [ten] doi model runtime (admin)."""
+    if not update.message:
+        return
+    if not llm_client.is_ready():
+        await update.message.reply_text(
+            "\u26A0\uFE0F LLM chưa được cấu hình. Thêm <code>OMNIROUTER_API_KEY</code> vào file .env rồi restart bot.",
+            parse_mode="HTML",
+        )
+        return
+
+    if not context.args:
+        st = llm_client.status()
+        await update.message.reply_text(
+            "\U0001F916 <b>CẤU HÌNH TRỢ LÝ AI</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"\u25fd Provider: <b>{st['provider']}</b>\n"
+            f"\u25fd Model: <code>{st['model']}</code>\n"
+            f"\u25fd Yêu cầu đã gửi: <b>{st['request_count']}</b> (lỗi: {st['error_count']})\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Đổi model runtime: <code>/model [tên-model-omnirouter]</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    # Doi model: chi admin
+    chat_id = update.effective_chat.id
+    if chat_id not in security.config.get("admin_ids", []):
+        await update.message.reply_text("\U0001F6E1 Chỉ admin mới được đổi model AI.")
+        return
+
+    new_model = context.args[0]
+    llm_client.set_model(new_model)
+    await update.message.reply_text(
+        f"\u2705 Đã đổi model AI thành: <code>{new_model}</code>\n"
+        "<i>Lưu ý: model không hợp lệ sẽ gây lỗi khi /ask.</i>",
+        parse_mode="HTML",
+    )
+
+
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Router cho cac su kien click nut (Inline Keyboard)."""
     query = update.callback_query
@@ -2546,8 +2702,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = update.effective_chat.id
     
     # Kiem tra quyen whitelist
-    if data not in ("menu_start", "menu_help"):
+    if data not in ("menu_start", "menu_help", "menu_ask"):
         action = data.replace("menu_", "")
+        # Quick-ask buttons (menu_ask_*) dung chung quyen "ask"
+        if action.startswith("ask_"):
+            action = "ask"
         access = security.check_access(chat_id, action)
         if not access["allowed"]:
             await query.answer(text=f"🛡️ {access['reason']}", show_alert=True)
@@ -2571,33 +2730,17 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await cmd_signals(update, context)
     elif data == "menu_help":
         await cmd_help(update, context)
+    elif data == "menu_ask":
+        await cmd_ask(update, context)
+    elif data == "menu_ask_btc":
+        await process_ask_question(update, context, "Xu hướng BTC hiện tại thế nào? Có nên vào lệnh ngay không?")
+    elif data == "menu_ask_trend":
+        await process_ask_question(update, context, "Xu hướng thị trường crypto tổng quan hôm nay thế nào?")
+    elif data == "menu_ask_news":
+        await process_ask_question(update, context, "Tin tức gì đang nóng ảnh hưởng đến thị trường crypto bây giờ?")
     else:
         logger.warning(f"Unknown callback query data: {data}")
         await query.answer("Chức năng không tồn tại!")
-
-
-async def handle_menu_text_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Xu ly khi nguoi dung nhan nut tren Persistent Keyboard."""
-    text = update.message.text.strip()
-    
-    if "📊 Quét Coins" in text:
-        await cmd_scan(update, context)
-    elif "📈 Ví Giả Lập" in text:
-        await cmd_paper(update, context)
-    elif "💼 Quản Lý Ví" in text:
-        await cmd_wallets(update, context)
-    elif "🛡️ Bảo Mật" in text:
-        await cmd_security(update, context)
-    elif "📰 Tin Tức" in text:
-        await cmd_news(update, context)
-    elif "📡 Tín Hiệu Active" in text:
-        await cmd_signals(update, context)
-    elif "🔔 Cảnh Báo" in text:
-        await cmd_alerts(update, context)
-    elif "📖 Hướng Dẫn" in text:
-        await cmd_help(update, context)
-    elif "🤖 Menu Chính" in text:
-        await cmd_start(update, context)
 
 
 #  MAIN - KHOI DONG BOT
@@ -2681,9 +2824,12 @@ def main():
 
     app.add_handler(CommandHandler("help", cmd_help))
 
-    # Bat ky tin nhan text nao trung khop nut bam -> dieu huong
-    menu_filter = filters.Regex("^(📊 Quét Coins|📈 Ví Giả Lập|💼 Quản Lý Ví|🛡️ Bảo Mật|📰 Tin Tức|📡 Tín Hiệu Active|🔔 Cảnh Báo|📖 Hướng Dẫn|🤖 Menu Chính)$")
-    app.add_handler(MessageHandler(menu_filter, requires_whitelist(handle_menu_text_button)))
+    # AI Chatbox commands
+    app.add_handler(CommandHandler("ask", requires_whitelist(cmd_ask)))
+    app.add_handler(CommandHandler("ai", requires_whitelist(cmd_ask)))
+    app.add_handler(CommandHandler("hoi", requires_whitelist(cmd_ask)))
+    app.add_handler(CommandHandler("chat", requires_whitelist(cmd_chat)))
+    app.add_handler(CommandHandler("model", requires_whitelist(cmd_model)))
 
     # Bat ky tin nhan text nao -> phan tich token
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, requires_whitelist(analyze_token)))
@@ -2697,7 +2843,7 @@ def main():
         trade_engine, telegram_manager, twitter_manager, system_status,
         signal_tracker=signal_tracker, listing_scanner=listing_scanner,
         security=security, wallet_manager=wallet_manager,
-        price_monitor=price_monitor
+        price_monitor=price_monitor, chat_engine=chat_engine
     )
 
     logger.success("Bot da san sang! Go ten token tren Telegram hoac truy cap http://localhost:8000/docs")
@@ -2731,6 +2877,28 @@ def main():
         await app.initialize()
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+
+        # Dang ky menu lenh cho nut "/" cua Telegram (chi hien khi user bam)
+        try:
+            await app.bot.set_my_commands([
+                BotCommand("start", "Menu chính"),
+                BotCommand("ask", "Hỏi Trợ lý AI"),
+                BotCommand("chat", "Quản lý phiên hỏi AI"),
+                BotCommand("model", "Xem/đổi model AI"),
+                BotCommand("menu", "Menu đầy đủ"),
+                BotCommand("scan", "Quét nhanh top coins"),
+                BotCommand("news", "Tin tức crypto"),
+                BotCommand("fng", "Fear & Greed"),
+                BotCommand("spot", "Tín hiệu Mua Spot"),
+                BotCommand("futures", "Tín hiệu Futures"),
+                BotCommand("paper", "Tài khoản giả lập"),
+                BotCommand("alerts", "Cảnh báo giá"),
+                BotCommand("gem", "Quét GEM trên DEX"),
+                BotCommand("help", "Hướng dẫn"),
+            ])
+            logger.info("Da dang ky menu lenh Telegram (set_my_commands).")
+        except Exception as e:
+            logger.warning(f"Khong dang ky duoc set_my_commands: {e}")
         
         # Keep alive
         while True:

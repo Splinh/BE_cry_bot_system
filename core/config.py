@@ -62,6 +62,15 @@ class Config:
     # --- Trend Filter ---
     ENABLE_TREND_FILTER: bool = os.getenv("ENABLE_TREND_FILTER", "true").lower() == "true"
 
+    # --- AI / LLM Chatbox (OmniRouter - self-hosted gateway) ---
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "omnirouter")                # omnirouter | (sau này: gemini, anthropic, local)
+    OMNIROUTER_BASE_URL: str = os.getenv("OMNIROUTER_BASE_URL", "http://139.99.89.215:20128/v1")
+    OMNIROUTER_API_KEY: str = os.getenv("OMNIROUTER_API_KEY", "")
+    OMNIROUTER_MODEL: str = os.getenv("OMNIROUTER_MODEL", "auto/best-chat")
+    LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "30"))                     # giây
+    LLM_MAX_HISTORY: int = int(os.getenv("LLM_MAX_HISTORY", "8"))              # số lượt hội thoại nhớ / chat_id
+    AI_RATE_LIMIT_PER_MIN: int = int(os.getenv("AI_RATE_LIMIT_PER_MIN", "5"))   # max câu hỏi / phút / user
+
 
 
     @classmethod
