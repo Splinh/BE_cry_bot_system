@@ -1812,6 +1812,188 @@ async def ai_status():
     return llm_client.status()
 
 # ============================================
+#  AI INTELLIGENCE (Phase 1-5)
+# ============================================
+
+@app.get("/api/ai/ml/status")
+async def ml_status():
+    """Trang thai ML Signal Booster: accuracy, samples, feature importance."""
+    try:
+        from analytics.ml_signal_booster import get_booster
+        booster = get_booster()
+        return booster.get_status()
+    except ImportError:
+        return {"error": "ML module not installed", "is_trained": False}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/api/ai/ml/retrain")
+async def ml_retrain():
+    """Trigger retrain ML model thu cong."""
+    try:
+        import asyncio
+        from analytics.ml_signal_booster import get_booster
+        booster = get_booster()
+        # train() rat nang (LightGBM + cross_val_score) -> chay trong thread rieng
+        # de khong block event loop cua bot.
+        result = await asyncio.to_thread(booster.train)
+        return result
+    except ImportError:
+        return {"error": "ML module not installed"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/ai/whale/status")
+async def whale_status():
+    """Whale signals hien tai: funding, OI, L/S ratio, order book."""
+    try:
+        from analytics.whale_tracker import WhaleTracker
+        tracker = WhaleTracker()
+        result = await tracker.compute_whale_bias("BTCUSDT")
+        await tracker.close()
+        return result
+    except ImportError:
+        return {"error": "Whale tracker module not installed"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/ai/whale/detail/{symbol}")
+async def whale_detail(symbol: str = "BTCUSDT"):
+    """Chi tiet tung whale indicator cho 1 symbol."""
+    try:
+        from analytics.whale_tracker import WhaleTracker
+        tracker = WhaleTracker()
+        results = {
+            "funding": await tracker.analyze_funding(symbol),
+            "open_interest": await tracker.analyze_open_interest(symbol),
+            "long_short": await tracker.analyze_long_short(symbol),
+            "order_book": await tracker.analyze_order_book(symbol),
+            "liquidations": await tracker.analyze_liquidations(symbol),
+            "taker_volume": await tracker.analyze_taker_volume(symbol),
+        }
+        await tracker.close()
+        return results
+    except ImportError:
+        return {"error": "Whale tracker module not installed"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/ai/news/sentiment")
+async def news_sentiment():
+    """Tin tuc + sentiment score + event adjustments."""
+    macro = None
+    try:
+        from analytics.news_intelligence import NewsIntelligence
+        from analytics.macro_calendar import MacroCalendar
+        intel = NewsIntelligence()
+        macro = MacroCalendar()
+        events = await macro.get_all_events(7)
+
+        bias = await intel.get_news_bias(recent_news=[], upcoming_events=events)
+        return bias
+    except ImportError:
+        return {"error": "News intelligence module not installed"}
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        if macro:
+            try:
+                await macro.close()
+            except Exception:
+                pass
+
+@app.get("/api/ai/regime")
+async def market_regime():
+    """Trang thai thi truong hien tai: TRENDING/RANGING/VOLATILE."""
+    analyzer = None
+    try:
+        from analytics.market_regime import MarketRegimeDetector
+        detector = MarketRegimeDetector()
+        analyzer = TechnicalAnalyzer()
+        df = await analyzer.get_ohlcv("BTC/USDT", "1h")
+        if df.empty:
+            return {"error": "Khong lay duoc du lieu OHLCV"}
+        df = analyzer.calculate_indicators(df)
+        result = detector.detect(df)
+        return result
+    except ImportError:
+        return {"error": "Market regime module not installed"}
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        if analyzer:
+            try:
+                await analyzer.close()
+            except Exception:
+                pass
+
+@app.get("/api/ai/trade-analysis/weekly")
+async def trade_analysis_weekly():
+    """Bao cao phan tich trade tuan nay."""
+    try:
+        from analytics.trade_analyzer import TradeAnalyzer
+        analyzer = TradeAnalyzer()
+        return analyzer.generate_weekly_report(days=7)
+    except ImportError:
+        return {"error": "Trade analyzer module not installed"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/ai/dashboard")
+async def ai_dashboard():
+    """Tong hop trang thai tat ca AI modules."""
+    result = {"modules": {}}
+    
+    # ML Booster
+    try:
+        from analytics.ml_signal_booster import get_booster
+        booster = get_booster()
+        status = booster.get_status()
+        result["modules"]["ml_booster"] = {
+            "active": True,
+            "is_trained": status["is_trained"],
+            "accuracy": status["model_accuracy"],
+            "total_samples": status["total_samples"],
+            "samples_until_train": status["samples_until_train"],
+        }
+    except Exception:
+        result["modules"]["ml_booster"] = {"active": False}
+
+    # Market Regime
+    try:
+        from analytics.market_regime import MarketRegimeDetector
+        result["modules"]["market_regime"] = {"active": True}
+    except Exception:
+        result["modules"]["market_regime"] = {"active": False}
+
+    # Whale Tracker
+    try:
+        from analytics.whale_tracker import WhaleTracker
+        result["modules"]["whale_tracker"] = {"active": True}
+    except Exception:
+        result["modules"]["whale_tracker"] = {"active": False}
+
+    # News Intelligence
+    try:
+        from analytics.news_intelligence import NewsIntelligence
+        result["modules"]["news_intelligence"] = {"active": True}
+    except Exception:
+        result["modules"]["news_intelligence"] = {"active": False}
+
+    # Trade Analyzer
+    try:
+        from analytics.trade_analyzer import TradeAnalyzer
+        analyzer = TradeAnalyzer()
+        result["modules"]["trade_analyzer"] = {
+            "active": True,
+            "total_analyses": len(analyzer.analyses),
+        }
+    except Exception:
+        result["modules"]["trade_analyzer"] = {"active": False}
+
+    return result
+
+# ============================================
 #  SERVER
 # ============================================
 

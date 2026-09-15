@@ -9,11 +9,15 @@ from typing import Optional
 
 import aiohttp
 import feedparser
+from aiohttp.resolver import ThreadedResolver
 from loguru import logger
 
 
-# CryptoPanic API (Free tier - khong can API key cho public posts)
-CRYPTOPANIC_API = "https://cryptopanic.com/api/free/v1/posts/"
+# CryptoPanic API
+# Luu y: endpoint free cu (/api/free/v1/posts/) da bi CryptoPanic bo -> tra ve HTTP 404.
+# Endpoint hien tai (/api/v1/posts/) BAT BUOC co auth_token -> neu khong co token thi
+# bo qua (tranh spam log loi 404 moi chu ky).
+CRYPTOPANIC_API = "https://cryptopanic.com/api/v1/posts/"
 
 # RSS Feeds
 RSS_FEEDS = {
@@ -37,7 +41,12 @@ class NewsCrawler:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
+            # Dung ThreadedResolver giong whale_tracker/macro_calendar:
+            # resolver mac dinh (aiodns/c-ares) bi loi DNS tren mot so may Windows
+            # -> "Could not contact DNS servers" lam news fetch luon tra ve rong.
+            connector = aiohttp.TCPConnector(resolver=ThreadedResolver())
             self.session = aiohttp.ClientSession(
+                connector=connector,
                 timeout=aiohttp.ClientTimeout(total=15)
             )
         return self.session
@@ -50,11 +59,15 @@ class NewsCrawler:
         """
         Lay tin tu CryptoPanic.
         filter_type: "hot" | "rising" | "bullish" | "bearish" | "important"
+        Yeu cau auth_token: endpoint free cu da bi bo (HTTP 404).
+        Neu chua cau hinh token -> tra ve rong (nguon RSS van hoat dong).
         """
+        if not self.cryptopanic_token:
+            logger.debug("[NewsCrawler] Chua co CRYPTOPANIC_TOKEN -> bo qua CryptoPanic, dung RSS")
+            return []
+
         session = await self._get_session()
-        params = {"filter": filter_type, "public": "true"}
-        if self.cryptopanic_token:
-            params["auth_token"] = self.cryptopanic_token
+        params = {"filter": filter_type, "public": "true", "auth_token": self.cryptopanic_token}
 
         try:
             async with session.get(CRYPTOPANIC_API, params=params) as resp:
@@ -139,14 +152,16 @@ class NewsCrawler:
 
     async def fetch_by_coin(self, coin: str, limit: int = 5) -> list[dict]:
         """Lay tin lien quan den 1 coin cu the (VD: BTC, ETH, SOL)."""
+        if not self.cryptopanic_token:
+            # Endpoint free da bi bo (404) -> khong goi khi thieu token
+            return []
         session = await self._get_session()
         params = {
             "currencies": coin.upper(),
             "public": "true",
             "filter": "hot",
+            "auth_token": self.cryptopanic_token,
         }
-        if self.cryptopanic_token:
-            params["auth_token"] = self.cryptopanic_token
 
         try:
             async with session.get(CRYPTOPANIC_API, params=params) as resp:

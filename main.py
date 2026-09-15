@@ -49,6 +49,9 @@ from api.server import run_server, inject_instances
 # Global instances
 trade_engine = TradeEngine()
 signal_tracker = SignalTracker(trade_engine=trade_engine)
+# Signal Scanner duoc khoi dong trong start_services(); default None de
+# shutdown handler an toan khi scanner khong khoi dong duoc (M7 cleanup).
+signal_scanner_service = None
 listing_scanner = ListingScanner()
 security = SecurityManager()
 telegram_manager = TelegramManager()
@@ -2901,9 +2904,18 @@ def main():
             logger.warning(f"Khong dang ky duoc set_my_commands: {e}")
         
         # Keep alive
-        while True:
-            system_status["uptime_minutes"] += 1
-            await asyncio.sleep(60)
+        try:
+            while True:
+                system_status["uptime_minutes"] += 1
+                await asyncio.sleep(60)
+        finally:
+            # Tat Signal Scanner + dong tai nguyen mang (ccxt/aiohttp) khi tat bot
+            if signal_scanner_service:
+                signal_scanner_service.stop()
+                try:
+                    await signal_scanner_service.aclose()
+                except Exception as e:
+                    logger.warning(f"Loi dong SignalScanner resources: {e}")
             
     try:
         # Chay event loop chinh

@@ -71,6 +71,20 @@ class Config:
     LLM_MAX_HISTORY: int = int(os.getenv("LLM_MAX_HISTORY", "8"))              # số lượt hội thoại nhớ / chat_id
     AI_RATE_LIMIT_PER_MIN: int = int(os.getenv("AI_RATE_LIMIT_PER_MIN", "5"))   # max câu hỏi / phút / user
 
+    # --- ML Signal Intelligence ---
+    ML_ENABLED: bool = os.getenv("ML_ENABLED", "true").lower() == "true"
+    ML_MIN_TRADES: int = int(os.getenv("ML_MIN_TRADES", "30"))                  # trades tối thiểu để train
+    ML_RETRAIN_INTERVAL: int = int(os.getenv("ML_RETRAIN_INTERVAL", "20"))      # retrain sau mỗi N trades mới
+
+    # --- Whale & Smart Money Tracker ---
+    WHALE_ENABLED: bool = os.getenv("WHALE_ENABLED", "true").lower() == "true"
+    WHALE_SCAN_INTERVAL: int = int(os.getenv("WHALE_SCAN_INTERVAL", "300"))     # quét mỗi 5 phút
+    WHALE_ALERT_API_KEY: str = os.getenv("WHALE_ALERT_API_KEY", "")             # free tier: 10 calls/min
+
+    # --- News Intelligence ---
+    NEWS_INTEL_ENABLED: bool = os.getenv("NEWS_INTEL_ENABLED", "true").lower() == "true"
+    NEWS_LLM_FOR_HIGH_IMPACT: bool = os.getenv("NEWS_LLM_FOR_HIGH_IMPACT", "true").lower() == "true"
+
 
 
     @classmethod

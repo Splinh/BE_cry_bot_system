@@ -2,15 +2,50 @@
 Real-time Signal Scanner Daemon
 Chạy nền liên tục để quét các tín hiệu kỹ thuật từ TechnicalAnalyzer.
 Tự động gửi thông báo về Telegram / Zalo khi phát hiện tín hiệu đảo chiều.
+
+Tích hợp AI Intelligence (Phase 1-5):
+- ML Signal Booster (confidence scoring)
+- Market Regime Detector (trending/ranging/volatile)
+- News Intelligence (LLM + event history)
+- Whale Tracker (smart money signals)
+- Trade Analyzer (post-mortem)
 """
 import asyncio
 import html
 from datetime import datetime
 from loguru import logger
 
+from core.config import Config
 from analytics.technical import TechnicalAnalyzer
 from notifiers.telegram_bot import TelegramNotifier
 from notifiers.zalo_bot import ZaloNotifier
+
+# AI Intelligence modules (graceful import)
+try:
+    from analytics.market_regime import MarketRegimeDetector
+except ImportError:
+    MarketRegimeDetector = None
+
+try:
+    from analytics.whale_tracker import WhaleTracker
+except ImportError:
+    WhaleTracker = None
+
+try:
+    from analytics.news_intelligence import NewsIntelligence
+except ImportError:
+    NewsIntelligence = None
+
+try:
+    from analytics.ml_signal_booster import AdaptiveSignalBooster, get_booster
+except ImportError:
+    AdaptiveSignalBooster = None
+    get_booster = None
+
+try:
+    from analytics.trade_analyzer import TradeAnalyzer
+except ImportError:
+    TradeAnalyzer = None
 
 
 class SignalScanner:
@@ -35,6 +70,25 @@ class SignalScanner:
         
         self._running = False
         self._task: asyncio.Task | None = None
+        self._closed = False  # M7: danh dau da dong tai nguyen mang (idempotent)
+
+        # === AI Intelligence Modules ===
+        self.regime_detector = MarketRegimeDetector() if MarketRegimeDetector else None
+        self.whale_tracker = WhaleTracker() if (WhaleTracker and Config.WHALE_ENABLED) else None
+        self.news_intel = NewsIntelligence() if (NewsIntelligence and Config.NEWS_INTEL_ENABLED) else None
+        self.ml_booster = get_booster() if (get_booster and Config.ML_ENABLED) else None
+        self.trade_analyzer = TradeAnalyzer() if TradeAnalyzer else None
+
+        # Cache for AI intelligence results (refreshed each scan cycle)
+        self._ai_cache: dict = {}
+
+        ai_modules = []
+        if self.regime_detector: ai_modules.append("MarketRegime")
+        if self.whale_tracker: ai_modules.append("WhaleTracker")
+        if self.news_intel: ai_modules.append("NewsIntel")
+        if self.ml_booster: ai_modules.append(f"MLBooster(samples={self.ml_booster.get_status()['total_samples']})")
+        if self.trade_analyzer: ai_modules.append("TradeAnalyzer")
+        logger.info(f"🧠 AI Intelligence modules loaded: {', '.join(ai_modules) if ai_modules else 'None'}")
 
     def start(self):
         """Khởi chạy task quét tín hiệu chạy nền."""
@@ -44,11 +98,39 @@ class SignalScanner:
             logger.info(f"🚀 SignalScanner đã khởi động (Khoảng thời gian: {self.interval}s, Coins: {self.symbols}, TFs: {self.timeframes})")
 
     def stop(self):
-        """Dừng quét tín hiệu."""
+        """Dừng quét tín hiệu và hẹn đóng tài nguyên mạng."""
         self._running = False
         if self._task:
             self._task.cancel()
+            self._task = None
             logger.info("⏹️ SignalScanner đã dừng.")
+        # Dong tai nguyen mang (ccxt session, aiohttp whale tracker) — idempotent.
+        # Neu dang trong event loop thi hen task; main.py se await truc tiep qua aclose().
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.aclose())
+        except RuntimeError:
+            pass  # Khong co event loop (vd goi tu script sync) — aclose se duoc goi rieng
+
+    async def aclose(self):
+        """
+        Dong tai nguyen mang cua scanner (TechnicalAnalyzer/ccxt, WhaleTracker/aiohttp).
+        Idempotent — goi nhieu lan an toan (stop() hen + main.py await truc tiep).
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self.analyzer:
+            try:
+                await self.analyzer.close()
+            except Exception as e:
+                logger.debug(f"Loi dong TechnicalAnalyzer: {e}")
+        if self.whale_tracker:
+            try:
+                await self.whale_tracker.close()
+            except Exception as e:
+                logger.debug(f"Loi dong WhaleTracker: {e}")
+        logger.info("🧹 SignalScanner đã đóng tài nguyên mạng.")
 
     def calculate_signal_rating(self, signal: dict, tf: str, macro_trend: str) -> int:
         """
@@ -93,6 +175,234 @@ class SignalScanner:
         
         return min(max(rating, 1), 5)
 
+    async def _refresh_ai_intelligence(self):
+        """
+        Refresh AI intelligence data moi scan cycle.
+        Chay song song: Whale data per symbol, sau do fetch News.
+        """
+        tasks = {}
+
+        # Whale tracker — per-symbol
+        if self.whale_tracker:
+            for sym in self.symbols:
+                binance_sym = sym.replace("/", "").replace("USDT", "") + "USDT"
+                tasks[f"whale_{binance_sym}"] = self.whale_tracker.compute_whale_bias(binance_sym)
+
+        # Run whale tasks in parallel (nếu có)
+        if tasks:
+            keys = list(tasks.keys())
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            for key, result in zip(keys, results):
+                if isinstance(result, Exception):
+                    logger.warning(f"[AI] {key} error: {result}")
+                else:
+                    self._ai_cache[key] = result
+
+        # News intelligence (chạy sau whale, dùng chung cho mọi symbol)
+        if self.news_intel:
+            try:
+                from analytics.macro_calendar import MacroCalendar
+                macro = MacroCalendar()
+                try:
+                    events = await macro.get_all_events(7)
+                finally:
+                    await macro.close()
+
+                # M2 fix: lay tin tuc that (truoc day hardcode recent_news=[] -> luon NEUTRAL)
+                recent_news = await self._fetch_recent_news()
+
+                news_bias = await self.news_intel.get_news_bias(
+                    recent_news=recent_news, upcoming_events=events
+                )
+                self._ai_cache["news"] = news_bias
+
+                # C4 fix: tu dong ghi nhan ket qua cac su kien macro da qua vao Event Impact DB
+                try:
+                    recorded = await self.news_intel.auto_record_past_events(events)
+                    if recorded:
+                        logger.info(f"📚 [NewsIntel] Da ghi nhan {recorded} su kien vao Event Impact DB")
+                except Exception as rec_err:
+                    logger.debug(f"[AI] Record event outcomes error: {rec_err}")
+            except Exception as e:
+                logger.debug(f"[AI] News intel error: {e}")
+
+        # Log AI summary
+        news = self._ai_cache.get("news", {})
+        parts = []
+        # Log whale cho BTC (primary)
+        btc_whale = self._ai_cache.get("whale_BTCUSDT", {})
+        if btc_whale.get("whale_bias", "NEUTRAL") != "NEUTRAL":
+            parts.append(f"🐋 BTC Whale={btc_whale['whale_bias']}(adj={btc_whale.get('rating_adjust', 0):+d})")
+        if news.get("news_bias", "NEUTRAL") != "NEUTRAL":
+            parts.append(f"📰 News={news['news_bias']}(adj={news.get('rating_adjust', 0):+d})")
+        if news.get("warnings"):
+            parts.append(f"⚠️ {len(news['warnings'])} warnings")
+        if parts:
+            logger.info(f"🧠 [AI Intelligence] {' | '.join(parts)}")
+
+    async def _fetch_recent_news(self) -> list:
+        """
+        Lay tin tuc that + cham sentiment (CryptoPanic/RSS + keyword sentiment).
+
+        Truoc day scanner hardcode recent_news=[] o call-site nen nhanh news sentiment
+        luon tra ve 0 -> news bias luon NEUTRAL (M2 fix).
+        Neu Config.NEWS_LLM_FOR_HIGH_IMPACT=true thi bo sung them phan tich LLM
+        cho toi da 2 tin quan trong (co cache de tiet kiem credit).
+        """
+        try:
+            from data_ingestion.news_crawler import NewsCrawler
+            from analytics.sentiment import SentimentAnalyzer
+        except ImportError:
+            return []
+
+        crawler = NewsCrawler()
+        try:
+            raw_news = await crawler.fetch_all(limit=10)
+        except Exception as e:
+            logger.debug(f"[AI] News fetch error: {e}")
+            return []
+        finally:
+            try:
+                await crawler.close()
+            except Exception:
+                pass
+
+        if not raw_news:
+            return []
+
+        try:
+            analyzed = SentimentAnalyzer().analyze_news_batch(raw_news)
+        except Exception as e:
+            logger.debug(f"[AI] Sentiment batch error: {e}")
+            return []
+
+        if Config.NEWS_LLM_FOR_HIGH_IMPACT and self.news_intel:
+            try:
+                analyzed = await self.news_intel.enrich_news_with_llm(analyzed, max_items=2)
+            except Exception as e:
+                logger.debug(f"[AI] News LLM enrich error: {e}")
+
+        return analyzed
+
+    def _apply_ai_adjustments(self, base_rating: int, signal: dict, df, tf: str, macro_trend: str, symbol: str = "") -> tuple:
+        """
+        Apply tat ca AI module adjustments len base_rating.
+        Returns (adjusted_rating, ai_details_dict).
+        """
+        ai_details = {}
+        total_adjust = 0
+        signal_dir = signal.get("direction", "NEUTRAL")
+
+        # 1. Market Regime (H2 fix: direction-aware)
+        if self.regime_detector and df is not None and not df.empty:
+            try:
+                regime_result = self.regime_detector.detect(df)
+                raw_adj = regime_result.get("adjustments", {}).get("rating_adjust", 0)
+                trend_dir = regime_result.get("trend_direction", "NEUTRAL")
+
+                # Direction-aware: chi boost neu signal cung huong voi trend
+                if raw_adj > 0 and trend_dir != "NEUTRAL":
+                    if (signal_dir == "LONG" and trend_dir == "BULLISH") or \
+                       (signal_dir == "SHORT" and trend_dir == "BEARISH"):
+                        regime_adj = raw_adj       # Cung huong → boost
+                    elif (signal_dir == "LONG" and trend_dir == "BEARISH") or \
+                         (signal_dir == "SHORT" and trend_dir == "BULLISH"):
+                        regime_adj = -raw_adj      # Nguoc huong → penalize
+                    else:
+                        regime_adj = 0
+                else:
+                    regime_adj = raw_adj  # Ranging/Volatile penalty giu nguyen
+
+                total_adjust += regime_adj
+                ai_details["regime"] = {
+                    "regime": regime_result["regime"],
+                    "confidence": regime_result["confidence"],
+                    "trend": trend_dir,
+                    "rating_adj": regime_adj,
+                }
+            except Exception as e:
+                logger.debug(f"[AI] Regime error: {e}")
+
+        # 2. Whale bias (H1 fix: per-symbol lookup)
+        binance_sym = symbol.replace("/", "").replace("USDT", "") + "USDT" if symbol else "BTCUSDT"
+        whale = self._ai_cache.get(f"whale_{binance_sym}", self._ai_cache.get("whale_BTCUSDT", {}))
+        if whale.get("whale_bias", "NEUTRAL") != "NEUTRAL":
+            whale_dir = whale["whale_bias"]
+            whale_adj = whale.get("rating_adjust", 0)
+
+            # Whale bias dong thuan voi signal → boost; nguoc lai → reduce
+            if (signal_dir == "LONG" and whale_dir == "BULLISH") or \
+               (signal_dir == "SHORT" and whale_dir == "BEARISH"):
+                total_adjust += abs(whale_adj)  # Dong thuan = +
+            elif (signal_dir == "LONG" and whale_dir == "BEARISH") or \
+                 (signal_dir == "SHORT" and whale_dir == "BULLISH"):
+                total_adjust -= abs(whale_adj)  # Nguoc chieu = -
+
+            ai_details["whale"] = {
+                "bias": whale_dir,
+                "confidence": whale.get("whale_confidence", 0),
+                "rating_adj": whale_adj,
+                "signals_count": len(whale.get("signals", [])),
+                "symbol": binance_sym,
+            }
+
+        # 3. News bias (H2 fix: direction-aware)
+        news = self._ai_cache.get("news", {})
+        if news:
+            raw_news_adj = news.get("rating_adjust", 0)
+            news_bias = news.get("news_bias", "NEUTRAL")
+
+            # Direction-aware: chi boost neu signal cung huong voi news
+            if raw_news_adj != 0 and news_bias != "NEUTRAL":
+                if (signal_dir == "LONG" and news_bias == "BULLISH") or \
+                   (signal_dir == "SHORT" and news_bias == "BEARISH"):
+                    news_adj = raw_news_adj       # Cung huong
+                elif (signal_dir == "LONG" and news_bias == "BEARISH") or \
+                     (signal_dir == "SHORT" and news_bias == "BULLISH"):
+                    news_adj = -abs(raw_news_adj)  # Nguoc huong → penalize
+                else:
+                    news_adj = 0
+            else:
+                news_adj = raw_news_adj  # Neutral hoac no-adj
+
+            total_adjust += news_adj
+            ai_details["news"] = {
+                "bias": news_bias,
+                "rating_adj": news_adj,
+                "should_pause": news.get("should_pause_auto_trade", False),
+                "warnings": news.get("warnings", []),
+            }
+
+        # 4. ML confidence
+        if self.ml_booster and df is not None:
+            try:
+                regime = ai_details.get("regime", {}).get("regime", "RANGING")
+                macro_risk = "NORMAL"  # Will be updated from cached macro data
+                ml_result = self.ml_booster.predict(df, signal, regime, macro_risk, tf)
+                ml_adj = ml_result.get("rating_adjust", 0)
+                total_adjust += ml_adj
+                ai_details["ml"] = {
+                    "confidence": ml_result["confidence"],
+                    "rating_adj": ml_adj,
+                    "is_trained": ml_result["is_trained"],
+                    "accuracy": ml_result.get("model_accuracy", 0),
+                    # PHAI giu '_features' de trade_engine thu thap sample khi dong lenh.
+                    # Neu thieu key nay thi feedback loop ML bi dut (model khong bao gio train).
+                    "_features": ml_result.get("_features"),
+                }
+            except Exception as e:
+                logger.debug(f"[AI] ML error: {e}")
+
+        # Clamp total adjustment
+        total_adjust = max(-3, min(3, total_adjust))
+        adjusted_rating = max(1, min(5, base_rating + total_adjust))
+
+        ai_details["total_adjust"] = total_adjust
+        ai_details["base_rating"] = base_rating
+        ai_details["final_rating"] = adjusted_rating
+
+        return adjusted_rating, ai_details
+
     async def _scan_loop(self):
         # Chờ 15 giây đầu tiên để các service khác ổn định trước khi quét lần đầu
         await asyncio.sleep(15)
@@ -100,6 +410,12 @@ class SignalScanner:
         while self._running:
             try:
                 logger.info("🔍 Đang chạy chu kỳ quét tín hiệu kỹ thuật real-time (Song song)...")
+
+                # === Refresh AI Intelligence trước khi quét ===
+                try:
+                    await self._refresh_ai_intelligence()
+                except Exception as ai_err:
+                    logger.warning(f"[AI] Refresh error (non-fatal): {ai_err}")
                 
                 # Tạo danh sách các task cần chạy song song
                 tasks = []
@@ -234,20 +550,50 @@ class SignalScanner:
                                         except Exception as ex:
                                             logger.error(f"Loi tinh toan Smart Levels cho {key}: {ex}")
 
-                                    # Tính rating
-                                    rating = self.calculate_signal_rating(signal, tf, macro_trend)
+                                    # Tính rating cơ sở
+                                    base_rating = self.calculate_signal_rating(signal, tf, macro_trend)
+                                    
+                                    # === AI INTELLIGENCE ADJUSTMENTS ===
+                                    rating, ai_details = self._apply_ai_adjustments(
+                                        base_rating, signal, df, tf, macro_trend, symbol=symbol
+                                    )
                                     signal["rating"] = rating
+                                    signal["ai_details"] = ai_details
+                                    
+                                    # Log AI adjustment nếu có thay đổi
+                                    if ai_details.get("total_adjust", 0) != 0:
+                                        logger.info(
+                                            f"🧠 [AI] {key}: Base={base_rating}⭐ → Final={rating}⭐ "
+                                            f"(adjust={ai_details['total_adjust']:+d}) | "
+                                            f"Regime={ai_details.get('regime', {}).get('regime', '?')} "
+                                            f"Whale={ai_details.get('whale', {}).get('bias', '?')} "
+                                            f"News={ai_details.get('news', {}).get('bias', '?')} "
+                                            f"ML={ai_details.get('ml', {}).get('confidence', '?')}"
+                                        )
+
+                                    # Check news: should_pause_auto_trade?
+                                    news_pause = ai_details.get("news", {}).get("should_pause", False)
                                     
                                     # Tự động vào lệnh nếu Auto Trade bật và tín hiệu >= 4 sao
                                     if self.trade_engine and self.trade_engine.auto_trade_enabled and self.signal_tracker:
-                                        if rating >= 4:
+                                        if news_pause:
+                                            logger.warning(f"⚠️ [AI] Auto-trade tạm dừng do sự kiện macro quan trọng")
+                                        elif rating >= 4:
                                             signal_key = f"{coin_name}_{tf}"
                                             if signal_key not in self.trade_engine.positions:
-                                                logger.info(f"🤖 [Auto Trade] Tự động mở vị thế cho {signal_key} (Rating: {rating} sao)")
+                                                logger.info(f"🤖 [Auto Trade] Tự động mở vị thế cho {signal_key} (Rating: {rating} sao, AI-adjusted)")
                                                 # Đòn bẩy thích ứng từ Smart SL/TP (cực đại là 10x)
                                                 rec_lev = smart_levels.get("recommended_leverage", 10) if (smart_levels and "error" not in smart_levels) else 10
                                                 trade_leverage = min(rec_lev, 10)
                                                 trade_leverage = max(trade_leverage, 1)
+                                                
+                                                # AI adjustments cho leverage và SL
+                                                regime_adj = ai_details.get("regime", {}).get("regime", "")
+                                                news_adj = self._ai_cache.get("news", {})
+                                                if regime_adj == "VOLATILE":
+                                                    trade_leverage = max(1, trade_leverage // 2)
+                                                if news_adj.get("leverage_mult", 1.0) < 1.0:
+                                                    trade_leverage = max(1, int(trade_leverage * news_adj["leverage_mult"]))
                                                 
                                                 self.signal_tracker.add_signal({
                                                     "key": signal_key,
@@ -264,10 +610,21 @@ class SignalScanner:
                                                     "rating": rating,
                                                     "tf": tf,
                                                     "atr": smart_levels.get("atr", 0) if (smart_levels and "error" not in smart_levels) else 0,
+                                                    "ai_details": ai_details,
                                                 })
                                         else:
                                             logger.info(f"⏭️ [Auto Trade] Bỏ qua {coin_name}_{tf} vì rating={rating} < 4 sao")
                                     
+# M7 fix: CRITICAL event khong con tru rating nua (chi pause auto-trade)
+                                    # → canh bao AI/su kien phai di kem tin nhan de trader manual biet rui ro.
+                                    ai_notes = ""
+                                    warn_parts = list(ai_details.get("news", {}).get("warnings", []))
+                                    warn_parts += list(ai_details.get("whale", {}).get("warnings", []))
+                                    if news_pause:
+                                        warn_parts.append("⛔ Auto-trade tam dung (su kien macro CRITICAL)")
+                                    if warn_parts:
+                                        ai_notes = " | ⚠️ " + " | ".join(str(w) for w in warn_parts[:2])
+
                                     # 1. Gửi Telegram Notifier
                                     logger.info(f"📨 Đang gửi tín hiệu Telegram cho {key}...")
                                     await self.tg_notifier.send_signal(
@@ -276,7 +633,7 @@ class SignalScanner:
                                         entry=entry,
                                         sl=smart_sl,
                                         tp=smart_tp3,
-                                        reason=html.escape(reasons_str),
+                                        reason=html.escape(reasons_str + ai_notes),
                                         rating=rating
                                     )
                                     
@@ -290,7 +647,7 @@ class SignalScanner:
                                         f"📍 Entry: ${entry:,.4f}\n"
                                         f"🛑 Stop Loss: ${smart_sl:,.4f}\n"
                                         f"🎯 Take Profit: ${smart_tp3:,.4f}\n"
-                                        f"💡 Lý do: {reasons_str}\n"
+                                        f"💡 Lý do: {reasons_str}{ai_notes}\n"
                                         f"━━━━━━━━━━━━━━━━━━"
                                     )
                                     await self.zalo_notifier.send_message(zalo_text)

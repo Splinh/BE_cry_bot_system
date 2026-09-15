@@ -929,6 +929,7 @@ class TradeEngine:
             "trough_price": entry,
             "runner_mode": False,
             "atr": signal.get("atr", 0),
+            "ai_details": signal.get("ai_details", {}),
         }
 
         if is_live and live_order:
@@ -1057,6 +1058,53 @@ class TradeEngine:
         pos["_closed_at"] = datetime.now().isoformat()
 
         logger.info(f"TRADE DONG LENH: {sig_key} | Ly do: {reason} | PnL phan cuoi: ${pnl:.2f} | Fees phan cuoi: ${close_fee if not is_live else 0:.4f} | Tong PnL: ${pos['pnl']:.2f} | Live: {is_live}")
+
+        # === AI Intelligence: Post-trade Analysis & ML Training ===
+        # H3 fix: chay trong background task de khong block event loop
+        def _ai_post_trade(pos_copy, sig_key):
+            """Sync function chay trong thread rieng."""
+            try:
+                from analytics.trade_analyzer import TradeAnalyzer
+                analyzer = TradeAnalyzer()
+                analysis = analyzer.analyze_trade(pos_copy)
+                if analysis:
+                    logger.info(
+                        f"🧠 [TradeAnalyzer] {pos_copy.get('coin')} {pos_copy.get('direction')}: "
+                        f"{analysis['outcome']} | Pattern: {analysis['pattern']} | "
+                        f"Efficiency: {analysis.get('sl_tp_analysis', {}).get('efficiency', 0):.0f}%"
+                    )
+            except Exception as e:
+                logger.debug(f"[AI] TradeAnalyzer error (non-fatal): {e}")
+
+            try:
+                from analytics.ml_signal_booster import get_booster
+                import numpy as np
+                booster = get_booster()
+                ai_details = pos_copy.get("ai_details", {})
+                if ai_details and ai_details.get("ml", {}).get("_features") is not None:
+                    features = np.array(ai_details["ml"]["_features"])
+                    label = 1 if pos_copy.get("pnl", 0) > 0 else 0
+                    # add_training_sample() tu dong retrain khi du nguong.
+                    # Doan nay chay trong worker thread (run_in_executor) nen train()
+                    # khong block event loop.
+                    booster.add_training_sample(features, label, pos_copy.get("pnl", 0), sig_key)
+                    logger.info(f"🧠 [MLBooster] Training sample added: {'WIN' if label else 'LOSS'} (total: {len(booster.training_data)})")
+            except Exception as e:
+                logger.debug(f"[AI] MLBooster training error (non-fatal): {e}")
+
+        try:
+            import asyncio
+            pos_copy = dict(pos)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None  # Dang o thread ngoai event loop (vd FastAPI threadpool / script sync)
+            if loop is not None:
+                loop.run_in_executor(None, _ai_post_trade, pos_copy, sig_key)
+            else:
+                _ai_post_trade(pos_copy, sig_key)
+        except Exception as e:
+            logger.debug(f"[AI] Post-trade scheduling error: {e}")
 
         # Dua vao history
         self.history.append(dict(pos))

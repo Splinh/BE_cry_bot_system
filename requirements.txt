@@ -39,3 +39,7 @@ eth-account>=0.9.0        # Quản lý ví Ethereum
 python-jose[cryptography]>=3.3.0  # JWT tokens
 passlib[bcrypt]>=1.7.4             # Password hashing
 bcrypt>=4.0.0                      # BCrypt backend
+
+# --- ML / AI Intelligence (Phase 1-5) ---
+scikit-learn>=1.3.0               # ML framework (GBM fallback, cross-val)
+lightgbm>=4.0.0                   # Gradient Boosting (nhe, nhanh, khong can GPU)
