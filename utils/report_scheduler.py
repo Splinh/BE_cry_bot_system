@@ -48,7 +48,7 @@ async def start_report_scheduler():
                 pnl_color = "🟢" if today_pnl >= 0 else "🔴"
                 
                 msg = (
-                    f"📊 <b>BÁO CÁO HIỆU SUẤT GÀY ({today_str})</b>\n"
+                    f"📊 <b>BÁO CÁO HIỆU SUẤT NGÀY ({today_str})</b>\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"💰 <b>Số dư hiện tại:</b> ${balance:,.2f}\n"
                     f"💼 <b>Vị thế đang mở:</b> {len(open_pos)}\n\n"

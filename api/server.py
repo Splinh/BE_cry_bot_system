@@ -1994,6 +1994,91 @@ async def ai_dashboard():
     return result
 
 # ============================================
+#  DAILY REPORTS
+# ============================================
+
+@app.get("/api/reports/latest")
+async def api_reports_latest():
+    """Lấy báo cáo mới nhất (full data)."""
+    try:
+        from services.daily_report import get_report_service
+        service = get_report_service()
+        report = service.get_latest_report()
+        if report:
+            return report
+        # Nếu chưa có report nào, generate 1 cái
+        report = await service.build_report("daily")
+        return report
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/reports/history")
+async def api_reports_history(limit: int = 30, offset: int = 0):
+    """Lấy danh sách reports (metadata only)."""
+    try:
+        from services.daily_report import get_report_service
+        service = get_report_service()
+        return {
+            "reports": service.get_report_history(limit=limit, offset=offset),
+            "limit": limit,
+            "offset": offset,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/reports/{report_id}")
+async def api_reports_detail(report_id: str):
+    """Lấy report chi tiết theo ID."""
+    try:
+        from services.daily_report import get_report_service
+        service = get_report_service()
+        report = service.get_report_by_id(report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found")
+        return report
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/reports/generate")
+async def api_reports_generate():
+    """Generate báo cáo mới ngay lập tức."""
+    try:
+        from services.daily_report import get_report_service
+        service = get_report_service()
+        report = await service.build_report("daily")
+        return report
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ReportToggleRequest(BaseModel):
+    morning: Optional[bool] = None
+    nightly: Optional[bool] = None
+
+
+@app.post("/api/reports/toggle")
+async def api_reports_toggle(req: ReportToggleRequest):
+    """Bật/tắt auto-report."""
+    try:
+        from services.daily_report import get_report_service
+        service = get_report_service()
+        if req.morning is not None:
+            service.toggle_morning(req.morning)
+        if req.nightly is not None:
+            service.toggle_nightly(req.nightly)
+        return {
+            "morning_enabled": service._auto_morning,
+            "nightly_enabled": service._auto_nightly,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================
 #  SERVER
 # ============================================
 

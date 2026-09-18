@@ -2746,6 +2746,85 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("Chức năng không tồn tại!")
 
 
+# ============================================
+#  DAILY REPORT COMMAND
+# ============================================
+
+@requires_whitelist
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /report — Xem/quản lý báo cáo hiệu suất trading."""
+    if not update.effective_chat:
+        return
+    msg_target = update.callback_query.message if update.callback_query else update.message
+    if not msg_target:
+        return
+
+    args = context.args if context.args else []
+    sub = args[0].lower() if args else ""
+
+    from services.daily_report import get_report_service
+    service = get_report_service()
+
+    if sub == "daily":
+        # /report daily on|off
+        if len(args) >= 2:
+            toggle = args[1].lower()
+            if toggle == "on":
+                service.toggle_morning(True)
+                service.toggle_nightly(True)
+                await msg_target.reply_text(
+                    "\U00002705 Báo cáo tự động đã <b>BẬT</b>\n"
+                    "  \U00002600 Sáng: 08:00\n"
+                    "  \U0001F319 Tối: 23:59",
+                    parse_mode="HTML"
+                )
+            elif toggle == "off":
+                service.toggle_morning(False)
+                service.toggle_nightly(False)
+                await msg_target.reply_text(
+                    "\U0001F6D1 Báo cáo tự động đã <b>TẮT</b>",
+                    parse_mode="HTML"
+                )
+            else:
+                await msg_target.reply_text(
+                    "Cách dùng: <code>/report daily on</code> hoặc <code>/report daily off</code>",
+                    parse_mode="HTML"
+                )
+            return
+
+    # Mặc định: generate + gửi report ngay
+    try:
+        # Typing indicator
+        typing_task = None
+        chat_id = update.effective_chat.id
+        try:
+            async def keep_typing():
+                while True:
+                    try:
+                        from telegram.constants import ChatAction
+                        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(4)
+            typing_task = asyncio.create_task(keep_typing())
+        except Exception:
+            pass
+
+        report = await service.build_report("daily")
+        text = service.format_daily_report(report)
+
+        if typing_task:
+            typing_task.cancel()
+
+        await msg_target.reply_text(text, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Lỗi tạo report: {e}")
+        await msg_target.reply_text(
+            f"\U0000274C Lỗi tạo báo cáo: <code>{html.escape(str(e))}</code>",
+            parse_mode="HTML"
+        )
+
+
 #  MAIN - KHOI DONG BOT
 # ============================================
 
@@ -2827,6 +2906,9 @@ def main():
 
     app.add_handler(CommandHandler("help", cmd_help))
 
+    # Daily Report command
+    app.add_handler(CommandHandler("report", requires_whitelist(cmd_report)))
+
     # AI Chatbox commands
     app.add_handler(CommandHandler("ask", requires_whitelist(cmd_ask)))
     app.add_handler(CommandHandler("ai", requires_whitelist(cmd_ask)))
@@ -2859,9 +2941,10 @@ def main():
         # Khoi tao API task
         api_task = asyncio.create_task(run_server(port=8000))
         
-        # Khoi dong Daily Report Scheduler
-        from utils.report_scheduler import start_report_scheduler
-        report_task = asyncio.create_task(start_report_scheduler())
+        # Khoi dong Daily Report Service (Morning 08:00 + Nightly 23:59)
+        from services.daily_report import init_report_service, run_report_scheduler
+        init_report_service(trade_engine=trade_engine, macro_calendar=MacroCalendar())
+        report_task = asyncio.create_task(run_report_scheduler())
         
         # Khoi dong Realtime Signal Scanner (quet moi 5 phut)
         try:
@@ -2888,6 +2971,7 @@ def main():
                 BotCommand("ask", "Hỏi Trợ lý AI"),
                 BotCommand("chat", "Quản lý phiên hỏi AI"),
                 BotCommand("model", "Xem/đổi model AI"),
+                BotCommand("report", "Báo cáo hiệu suất"),
                 BotCommand("menu", "Menu đầy đủ"),
                 BotCommand("scan", "Quét nhanh top coins"),
                 BotCommand("news", "Tin tức crypto"),
