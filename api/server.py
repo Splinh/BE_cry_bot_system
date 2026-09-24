@@ -6,7 +6,7 @@ import os
 import json
 import asyncio
 from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, APIRouter, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -14,28 +14,46 @@ import uvicorn
 from loguru import logger
 import httpx
 from analytics.technical import TechnicalAnalyzer
+from core.config import Config
+from api.auth import get_current_user, require_permission
 
 app = FastAPI(title="Crypto Bot Dashboard API")
 
+# Configure CORS securely
+cors_origins_raw = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://127.0.0.1:3000,https://cry.splworks.com,http://cry.splworks.com"
+)
+allowed_origins = [o.strip() for o in cors_origins_raw.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Auth router
+# Public health endpoints (no authentication required)
+@app.get("/health")
+@app.get("/api/health")
+def api_health():
+    return {"status": "ok"}
+
+# Auth router (public login/register, protected /me)
 from api.auth import router as auth_router
 app.include_router(auth_router)
 
-# GameFi router
+# GameFi router (protected with require_permission("gamefi"))
 from api.gamefi import router as gamefi_router
 app.include_router(gamefi_router)
 
-# Users management router
+# Users management router (protected with require_admin)
 from api.users import router as users_router
 app.include_router(users_router)
+
+# Protected Core API Router
+api_router = APIRouter(dependencies=[Depends(get_current_user)])
 
 # Instances inject tu main.py
 ctx = {
@@ -100,7 +118,7 @@ def get_fear_and_greed():
 def health():
     return {"status": "ok"}
 
-@app.get("/api/overview")
+@api_router.get("/api/overview")
 def get_overview():
     status = ctx["status"] or {}
     te = ctx["trade_engine"]
@@ -223,7 +241,7 @@ def _get_latest_prices() -> dict:
     _price_cache["ts"] = now
     return prices
 
-@app.get("/api/prices")
+@api_router.get("/api/prices")
 def get_prices():
     """Tra ve gia real-time cua cac coins chinh."""
     prices = _get_latest_prices()
@@ -285,7 +303,7 @@ def _fetch_gem_prices(te) -> dict:
     
     return _gem_price_cache
 
-@app.get("/api/trading")
+@api_router.get("/api/trading")
 def get_trading():
     te = ctx["trade_engine"]
     if not te: return {"error": "Not init"}
@@ -365,7 +383,7 @@ def get_trading():
 class TradingConfigReq(BaseModel):
     live_mode: bool
 
-@app.get("/api/trading/config")
+@api_router.get("/api/trading/config")
 def get_trading_config():
     from data.database import db
     from core.config import Config
@@ -378,7 +396,7 @@ def get_trading_config():
         "has_api_keys": has_api_keys
     }
 
-@app.post("/api/trading/config")
+@api_router.post("/api/trading/config", dependencies=[Depends(require_permission("trading"))])
 def update_trading_config(req: TradingConfigReq):
     from data.database import db
     from core.config import Config
@@ -391,12 +409,12 @@ def update_trading_config(req: TradingConfigReq):
     logger.info(f"[Web] Live Mode -> {req.live_mode}")
     return {"success": True, "live_mode": req.live_mode}
 
-@app.get("/api/trading/history")
+@api_router.get("/api/trading/history")
 def get_history():
     te = ctx["trade_engine"]
     return {"history": te.history[-50:] if te else []}
 
-@app.post("/api/trading/toggle")
+@api_router.post("/api/trading/toggle", dependencies=[Depends(require_permission("trading"))])
 def toggle_trade():
     te = ctx["trade_engine"]
     if not te: raise HTTPException(500, "No trade engine")
@@ -415,7 +433,7 @@ class ManualTradeReq(BaseModel):
     custom_sl: Optional[float] = None
     custom_tp: Optional[float] = None
 
-@app.post("/api/trading/open")
+@api_router.post("/api/trading/open", dependencies=[Depends(require_permission("trading"))])
 async def open_manual_trade(req: ManualTradeReq):
     """Mo lenh thu cong voi Smart SL/TP (ATR + S/R + Fibonacci)."""
     te = ctx["trade_engine"]
@@ -441,8 +459,12 @@ async def open_manual_trade(req: ManualTradeReq):
     if current_price <= 0:
         raise HTTPException(400, f"Khong lay duoc gia {req.coin}")
     
-    if req.leverage < 1 or req.leverage > 125:
-        raise HTTPException(400, "Leverage phai tu 1-125x")
+    if req.direction.upper() not in ("LONG", "SHORT"):
+        raise HTTPException(400, "Direction phai la LONG hoac SHORT")
+    if req.usdt_size <= 0:
+        raise HTTPException(400, "usdt_size phai lon hon 0")
+    if req.leverage < 1 or req.leverage > Config.MAX_LEVERAGE:
+        raise HTTPException(400, f"Leverage phai tu 1-{Config.MAX_LEVERAGE}x")
     
     # === SMART SL/TP: Tinh ATR + S/R + Fibonacci ===
     smart_levels = None
@@ -544,7 +566,7 @@ async def open_manual_trade(req: ManualTradeReq):
     is_dca = pos.get("dca_count", 0) > 0
     return {"success": True, "position": pos, "is_dca": is_dca}
 
-@app.post("/api/trading/close/{sig_key}")
+@api_router.post("/api/trading/close/{sig_key}", dependencies=[Depends(require_permission("trading"))])
 def close_position_web(sig_key: str):
     """Dong lenh tu Web Dashboard."""
     te = ctx["trade_engine"]
@@ -584,7 +606,7 @@ class DepositWithdrawReq(BaseModel):
     amount: float = 100
     note: str = ""
 
-@app.post("/api/trading/deposit")
+@api_router.post("/api/trading/deposit", dependencies=[Depends(require_permission("trading"))])
 def deposit_funds(req: DepositWithdrawReq):
     te = ctx["trade_engine"]
     if not te: raise HTTPException(500, "No trade engine")
@@ -593,7 +615,7 @@ def deposit_funds(req: DepositWithdrawReq):
         raise HTTPException(400, result.get("error", "Loi nap tien"))
     return result
 
-@app.post("/api/trading/withdraw")
+@api_router.post("/api/trading/withdraw", dependencies=[Depends(require_permission("trading"))])
 def withdraw_funds(req: DepositWithdrawReq):
     te = ctx["trade_engine"]
     if not te: raise HTTPException(500, "No trade engine")
@@ -602,13 +624,13 @@ def withdraw_funds(req: DepositWithdrawReq):
         raise HTTPException(400, result.get("error", "Loi rut tien"))
     return result
 
-@app.get("/api/trading/balance-history")
+@api_router.get("/api/trading/balance-history")
 def get_balance_history():
     te = ctx["trade_engine"]
     if not te: return {"history": []}
     return {"history": te.balance_history[-50:], "balance": te.balance}
 
-@app.get("/api/trading/report")
+@api_router.get("/api/trading/report")
 def get_trading_report():
     te = ctx["trade_engine"]
     if not te: return {"error": "Not init"}
@@ -617,7 +639,7 @@ def get_trading_report():
 class ResetReq(BaseModel):
     amount: float = 10000.0
 
-@app.post("/api/trading/reset")
+@api_router.post("/api/trading/reset", dependencies=[Depends(require_permission("trading"))])
 def reset_trading(req: ResetReq):
     te = ctx["trade_engine"]
     if not te: raise HTTPException(500, "No trade engine")
@@ -631,7 +653,7 @@ def reset_trading(req: ResetReq):
 
 _sl_tp_events: list = []  # Luu cac su kien SL/TP gan nhat
 
-@app.get("/api/trading/sl-tp-events")
+@api_router.get("/api/trading/sl-tp-events")
 def get_sl_tp_events():
     """Lay cac su kien SL/TP gan nhat (frontend poll de hien toast)."""
     events = list(_sl_tp_events)
@@ -665,7 +687,7 @@ async def start_sl_tp_monitor():
             await asyncio.sleep(3)
     asyncio.create_task(monitor_loop())
 
-@app.get("/api/trading/scalping")
+@api_router.get("/api/trading/scalping")
 def get_scalping_signals():
     """
     Tin hieu scalping don bay cao - dua tren chi bao ky thuat that.
@@ -828,7 +850,7 @@ def get_scalping_signals():
     scalp_signals.sort(key=lambda x: (x["confidence"], x["rr_ratio"]), reverse=True)
     return {"signals": scalp_signals}
 
-@app.get("/api/trading/analyze/{coin}")
+@api_router.get("/api/trading/analyze/{coin}")
 async def leverage_analyze(coin: str, leverage: int = 10, market_type: str = "futures", timeframe: str = "auto"):
     """
     Phan tich ky thuat chi tiet cho 1 coin voi leverage cu the.
@@ -982,7 +1004,7 @@ async def leverage_analyze(coin: str, leverage: int = 10, market_type: str = "fu
 #  SIGNALS
 # ============================================
 
-@app.get("/api/signals")
+@api_router.get("/api/signals")
 def get_signals():
     st = ctx["signal_tracker"]
     if not st: return {"signals": []}
@@ -997,7 +1019,7 @@ def get_signals():
 #  WALLETS
 # ============================================
 
-@app.get("/api/wallets")
+@api_router.get("/api/wallets")
 def get_wallets():
     wm = ctx["wallet_manager"]
     if not wm: return {"wallets": [], "summary": {}}
@@ -1009,7 +1031,7 @@ class CreateWalletReq(BaseModel):
     label: Optional[str] = ""
     count: Optional[int] = 1
 
-@app.post("/api/wallets/create")
+@api_router.post("/api/wallets/create", dependencies=[Depends(require_permission("wallets"))])
 def create_wallet(req: CreateWalletReq):
     wm = ctx["wallet_manager"]
     if not wm: raise HTTPException(500, "Wallet Manager not init")
@@ -1021,7 +1043,7 @@ def create_wallet(req: CreateWalletReq):
         w = wm.create_wallet(label=req.label or "")
         return {"success": True, "address": w["address"], "label": w["label"], "total": len(wm.wallets)}
 
-@app.get("/api/wallets/export")
+@api_router.get("/api/wallets/export", dependencies=[Depends(require_permission("wallets"))])
 def export_wallets():
     wm = ctx["wallet_manager"]
     if not wm: return {"addresses": ""}
@@ -1031,7 +1053,7 @@ def export_wallets():
 #  SOCIAL BOTNET
 # ============================================
 
-@app.get("/api/social")
+@api_router.get("/api/social")
 def get_social():
     tele = ctx["telegram_manager"]
     twit = ctx["twitter_manager"]
@@ -1043,7 +1065,7 @@ class ClaimReq(BaseModel):
     bot_username: str
     command: str
 
-@app.post("/api/social/claimall")
+@api_router.post("/api/social/claimall", dependencies=[Depends(require_permission("social"))])
 def claimall(req: ClaimReq):
     tele = ctx["telegram_manager"]
     if not tele or not tele.workers: raise HTTPException(400, "No Tele sessions")
@@ -1054,7 +1076,7 @@ def claimall(req: ClaimReq):
 class RaidReq(BaseModel):
     tweet_id: str
 
-@app.post("/api/social/raid")
+@api_router.post("/api/social/raid", dependencies=[Depends(require_permission("social"))])
 def raid(req: RaidReq):
     twit = ctx["twitter_manager"]
     if not twit or not twit.workers: raise HTTPException(400, "No Twitter accounts")
@@ -1066,7 +1088,7 @@ def raid(req: RaidReq):
 #  CEX AIRDROPS
 # ============================================
 
-@app.get("/api/airdrops")
+@api_router.get("/api/airdrops")
 async def get_airdrops():
     try:
         from analytics.cex_airdrop import CexAirdropScanner
@@ -1080,7 +1102,7 @@ async def get_airdrops():
 #  SECURITY & AUDIT
 # ============================================
 
-@app.get("/api/security/audit")
+@api_router.get("/api/security/audit")
 def get_audit():
     af = "data/security/audit_log.json"
     if not os.path.exists(af):
@@ -1096,7 +1118,7 @@ def get_audit():
 #  MACRO CALENDAR & ECONOMIC EVENTS
 # ============================================
 
-@app.get("/api/macro/calendar")
+@api_router.get("/api/macro/calendar")
 async def get_macro_calendar(days: int = 30):
     """Lay toan bo su kien kinh te sap toi (FOMC, CPI, NFP, GDP...)."""
     from analytics.macro_calendar import MacroCalendar
@@ -1110,7 +1132,7 @@ async def get_macro_calendar(days: int = 30):
     finally:
         await macro.close()
 
-@app.get("/api/macro/next")
+@api_router.get("/api/macro/next")
 async def get_macro_next():
     """Lay su kien CRITICAL/HIGH gan nhat sap dien ra."""
     from analytics.macro_calendar import MacroCalendar
@@ -1124,7 +1146,7 @@ async def get_macro_next():
     finally:
         await macro.close()
 
-@app.get("/api/macro/risk")
+@api_router.get("/api/macro/risk")
 async def get_macro_risk():
     """Danh gia muc do rui ro hien tai dua tren events sap toi."""
     from analytics.macro_calendar import MacroCalendar
@@ -1179,7 +1201,7 @@ def _flatten_gem(raw: dict) -> dict:
         "pair_created_at": pair.get("pairCreatedAt"),
     }
 
-@app.get("/api/gems/scan")
+@api_router.get("/api/gems/scan")
 async def scan_gems(chain: str = "solana"):
     """Quet va tim gem tiem nang tren DEX."""
     try:
@@ -1193,7 +1215,7 @@ async def scan_gems(chain: str = "solana"):
         logger.error(f"Gem scan error: {e}")
         return {"gems": [], "error": str(e)}
 
-@app.get("/api/gems/new")
+@api_router.get("/api/gems/new")
 async def scan_new_listings_dex(chain: str = "solana", hours: float = 1.0):
     """Quet token moi list tren DEX trong vong n gio."""
     try:
@@ -1207,7 +1229,7 @@ async def scan_new_listings_dex(chain: str = "solana", hours: float = 1.0):
         logger.error(f"New listings scan error: {e}")
         return {"tokens": [], "error": str(e)}
 
-@app.get("/api/gems/analyze")
+@api_router.get("/api/gems/analyze")
 async def analyze_token(query: str = ""):
     """Phan tich sau 1 token (ten hoac dia chi contract)."""
     if not query:
@@ -1236,7 +1258,7 @@ class GemBuyReq(BaseModel):
     wallet_id: Optional[int] = None
     wallet_label: Optional[str] = ""
 
-@app.post("/api/gems/buy")
+@api_router.post("/api/gems/buy", dependencies=[Depends(require_permission("gems"))])
 def buy_gem_token(req: GemBuyReq):
     """Mua gem token (paper trading) - tao position va track PnL."""
     te = ctx["trade_engine"]
@@ -1305,7 +1327,7 @@ def buy_gem_token(req: GemBuyReq):
 #  CEX LISTING SCANNER (Tim token sap len Binance)
 # ============================================
 
-@app.get("/api/listing/potential")
+@api_router.get("/api/listing/potential")
 async def find_potential():
     """Tim token da co Gate/MEXC nhung chua co Binance."""
     ls = ctx["listing_scanner"]
@@ -1319,7 +1341,7 @@ async def find_potential():
         logger.error(f"Potential listing error: {e}")
         return {"tokens": [], "error": str(e)}
 
-@app.get("/api/listing/binance-news")
+@api_router.get("/api/listing/binance-news")
 async def binance_news():
     """Lay thong bao listing moi tu Binance."""
     ls = ctx["listing_scanner"]
@@ -1332,49 +1354,6 @@ async def binance_news():
     except Exception as e:
         return {"listings": [], "error": str(e)}
 
-# ============================================
-#  MACRO CALENDAR (Su kien kinh te)
-# ============================================
-
-@app.get("/api/macro/calendar")
-async def get_macro_calendar(days: int = 30):
-    """Lay lich su kien kinh te quan trong (FOMC, CPI, NFP, GDP...)."""
-    from analytics.macro_calendar import MacroCalendar
-    mc = MacroCalendar()
-    try:
-        events = await mc.get_all_events(days)
-        return {"events": events, "count": len(events)}
-    except Exception as e:
-        logger.error(f"Macro calendar error: {e}")
-        return {"events": mc.get_builtin_events(days), "count": 0, "fallback": True}
-    finally:
-        await mc.close()
-
-@app.get("/api/macro/next")
-async def get_next_macro_event():
-    """Lay su kien CRITICAL/HIGH gan nhat sap dien ra."""
-    from analytics.macro_calendar import MacroCalendar
-    mc = MacroCalendar()
-    try:
-        next_event = await mc.get_next_critical()
-        return {"event": next_event}
-    except Exception as e:
-        return {"event": None, "error": str(e)}
-    finally:
-        await mc.close()
-
-@app.get("/api/macro/risk")
-async def get_macro_risk():
-    """Danh gia muc do rui ro hien tai dua tren su kien sap toi."""
-    from analytics.macro_calendar import MacroCalendar
-    mc = MacroCalendar()
-    try:
-        risk = await mc.assess_risk()
-        return risk
-    except Exception as e:
-        return {"risk_level": "NORMAL", "warnings": [], "error": str(e)}
-    finally:
-        await mc.close()
 
 # ============================================
 #  BACKTESTING ENGINE
@@ -1392,7 +1371,7 @@ class BacktestReq(BaseModel):
     tp3_pct: float = 0.10
     min_score: int = 3
 
-@app.post("/api/backtest/run")
+@api_router.post("/api/backtest/run")
 async def run_backtest(req: BacktestReq):
     """Chay backtest chien luoc TA tren du lieu lich su."""
     try:
@@ -1415,7 +1394,7 @@ async def run_backtest(req: BacktestReq):
         logger.error(f"Backtest error: {e}")
         return {"error": str(e)}
 
-@app.get("/api/backtest/presets")
+@api_router.get("/api/backtest/presets")
 def get_backtest_presets():
     """Tra ve cac preset chien luoc co san."""
     from analytics.backtester import BacktestEngine
@@ -1453,7 +1432,7 @@ class LimitOrderReq(BaseModel):
     leverage: int = 1
     expiry_hours: float = 24  # Tu dong huy sau N gio
 
-@app.get("/api/orders/pending")
+@api_router.get("/api/orders/pending")
 def get_pending_orders():
     orders = _load_limit_orders()
     # Loc cac lenh het han
@@ -1461,7 +1440,7 @@ def get_pending_orders():
     active = [o for o in orders if o.get("status") == "PENDING" and o.get("expires_at", "9") > now]
     return {"orders": active, "count": len(active)}
 
-@app.post("/api/orders/create")
+@api_router.post("/api/orders/create", dependencies=[Depends(require_permission("trading"))])
 def create_limit_order(req: LimitOrderReq):
     orders = _load_limit_orders()
     
@@ -1469,6 +1448,13 @@ def create_limit_order(req: LimitOrderReq):
     prices = _get_latest_prices()
     symbol = f"{req.coin.upper()}USDT"
     current_price = prices.get(symbol, {}).get("price", 0)
+    
+    if req.direction.upper() not in ("LONG", "SHORT"):
+        raise HTTPException(400, "Direction phai la LONG hoac SHORT")
+    if req.usdt_size <= 0:
+        raise HTTPException(400, "usdt_size phai lon hon 0")
+    if req.leverage < 1 or req.leverage > Config.MAX_LEVERAGE:
+        raise HTTPException(400, f"Leverage phai tu 1-{Config.MAX_LEVERAGE}x")
     
     # Validate: LONG limit phai o duoi gia hien tai, SHORT o tren
     if current_price > 0:
@@ -1499,7 +1485,7 @@ def create_limit_order(req: LimitOrderReq):
     logger.info(f"[LimitOrder] Created: {req.direction} {req.coin} @ ${req.trigger_price:,.2f} | Size: ${req.usdt_size}")
     return {"success": True, "order": order}
 
-@app.delete("/api/orders/cancel/{order_id}")
+@api_router.delete("/api/orders/cancel/{order_id}", dependencies=[Depends(require_permission("trading"))])
 def cancel_limit_order(order_id: str):
     orders = _load_limit_orders()
     for o in orders:
@@ -1511,7 +1497,7 @@ def cancel_limit_order(order_id: str):
             return {"success": True}
     raise HTTPException(404, "Order not found")
 
-@app.get("/api/orders/filled")
+@api_router.get("/api/orders/filled")
 def get_filled_orders():
     orders = _load_limit_orders()
     filled = [o for o in orders if o.get("status") == "FILLED"]
@@ -1520,7 +1506,7 @@ def get_filled_orders():
 # Background monitor cho Limit Orders
 _limit_order_events: list = []
 
-@app.get("/api/orders/events")
+@api_router.get("/api/orders/events")
 def get_order_events():
     """Lay cac su kien limit order vua khop (frontend poll de toast)."""
     events = list(_limit_order_events)
@@ -1624,14 +1610,18 @@ class DCACreateReq(BaseModel):
     total_buys: int = 30           # Tong so lan mua (0 = vo han)
     leverage: int = 1
 
-@app.get("/api/dca/plans")
+@api_router.get("/api/dca/plans")
 def get_dca_plans():
     plans = _load_dca_plans()
     active = [p for p in plans if p.get("status") in ("ACTIVE", "PAUSED")]
     return {"plans": active, "count": len(active)}
 
-@app.post("/api/dca/create")
+@api_router.post("/api/dca/create", dependencies=[Depends(require_permission("trading"))])
 def create_dca_plan(req: DCACreateReq):
+    if req.amount_per_buy <= 0:
+        raise HTTPException(400, "amount_per_buy phai lon hon 0")
+    if req.leverage < 1 or req.leverage > Config.MAX_LEVERAGE:
+        raise HTTPException(400, f"Leverage phai tu 1-{Config.MAX_LEVERAGE}x")
     plans = _load_dca_plans()
     plan_id = f"DCA_{req.coin.upper()}_{int(_time.time())}"
     
@@ -1662,7 +1652,7 @@ def create_dca_plan(req: DCACreateReq):
     logger.info(f"[DCA] Created: {req.coin} ${req.amount_per_buy}/{req.interval} x{req.total_buys}")
     return {"success": True, "plan": plan}
 
-@app.post("/api/dca/toggle/{plan_id}")
+@api_router.post("/api/dca/toggle/{plan_id}", dependencies=[Depends(require_permission("trading"))])
 def toggle_dca_plan(plan_id: str):
     plans = _load_dca_plans()
     for p in plans:
@@ -1675,7 +1665,7 @@ def toggle_dca_plan(plan_id: str):
             return {"success": True, "status": p["status"]}
     raise HTTPException(404, "Plan not found")
 
-@app.delete("/api/dca/delete/{plan_id}")
+@api_router.delete("/api/dca/delete/{plan_id}", dependencies=[Depends(require_permission("trading"))])
 def delete_dca_plan(plan_id: str):
     plans = _load_dca_plans()
     for p in plans:
@@ -1685,7 +1675,7 @@ def delete_dca_plan(plan_id: str):
             return {"success": True}
     raise HTTPException(404, "Plan not found")
 
-@app.get("/api/dca/history")
+@api_router.get("/api/dca/history")
 def get_dca_history():
     plans = _load_dca_plans()
     # Tra ve tat ca plans (ke ca completed) kem lich su mua
@@ -1728,8 +1718,12 @@ async def start_dca_scheduler():
                         if current_price <= 0:
                             continue
                         
-                        # Check balance
-                        margin = p["amount_per_buy"] / p["leverage"]
+                        # Check balance & safe leverage
+                        lev = max(1, min(p.get("leverage", 1), Config.MAX_LEVERAGE))
+                        amount = max(0.0, p.get("amount_per_buy", 0.0))
+                        if amount <= 0:
+                            continue
+                        margin = amount / lev
                         if margin > te.balance:
                             logger.warning(f"[DCA] {p['coin']}: Khong du so du (can ${margin:.2f})")
                             continue
@@ -1782,7 +1776,7 @@ class AIAskRequest(BaseModel):
     question: str
     chat_id: int = 0
 
-@app.post("/api/ai/ask")
+@api_router.post("/api/ai/ask", dependencies=[Depends(require_permission("analysis"))])
 async def ai_ask(req: AIAskRequest):
     """Hoi tro ly AI - tra loi kem du lieu thi truong thuc."""
     engine = ctx.get("chat_engine")
@@ -1805,7 +1799,7 @@ async def ai_ask(req: AIAskRequest):
         logger.error(f"API /api/ai/ask error: {e}")
         return {"error": str(e)}
 
-@app.get("/api/ai/status")
+@api_router.get("/api/ai/status")
 async def ai_status():
     """Trang thai cau hinh LLM (provider, model, so request)."""
     from ai.llm_client import llm_client
@@ -1815,7 +1809,7 @@ async def ai_status():
 #  AI INTELLIGENCE (Phase 1-5)
 # ============================================
 
-@app.get("/api/ai/ml/status")
+@api_router.get("/api/ai/ml/status")
 async def ml_status():
     """Trang thai ML Signal Booster: accuracy, samples, feature importance."""
     try:
@@ -1827,7 +1821,7 @@ async def ml_status():
     except Exception as e:
         return {"error": str(e)}
 
-@app.post("/api/ai/ml/retrain")
+@api_router.post("/api/ai/ml/retrain")
 async def ml_retrain():
     """Trigger retrain ML model thu cong."""
     try:
@@ -1843,7 +1837,7 @@ async def ml_retrain():
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/api/ai/whale/status")
+@api_router.get("/api/ai/whale/status")
 async def whale_status():
     """Whale signals hien tai: funding, OI, L/S ratio, order book."""
     try:
@@ -1857,7 +1851,7 @@ async def whale_status():
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/api/ai/whale/detail/{symbol}")
+@api_router.get("/api/ai/whale/detail/{symbol}")
 async def whale_detail(symbol: str = "BTCUSDT"):
     """Chi tiet tung whale indicator cho 1 symbol."""
     try:
@@ -1878,7 +1872,7 @@ async def whale_detail(symbol: str = "BTCUSDT"):
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/api/ai/news/sentiment")
+@api_router.get("/api/ai/news/sentiment")
 async def news_sentiment():
     """Tin tuc + sentiment score + event adjustments."""
     macro = None
@@ -1902,7 +1896,7 @@ async def news_sentiment():
             except Exception:
                 pass
 
-@app.get("/api/ai/regime")
+@api_router.get("/api/ai/regime")
 async def market_regime():
     """Trang thai thi truong hien tai: TRENDING/RANGING/VOLATILE."""
     analyzer = None
@@ -1927,7 +1921,7 @@ async def market_regime():
             except Exception:
                 pass
 
-@app.get("/api/ai/trade-analysis/weekly")
+@api_router.get("/api/ai/trade-analysis/weekly")
 async def trade_analysis_weekly():
     """Bao cao phan tich trade tuan nay."""
     try:
@@ -1939,7 +1933,7 @@ async def trade_analysis_weekly():
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/api/ai/dashboard")
+@api_router.get("/api/ai/dashboard")
 async def ai_dashboard():
     """Tong hop trang thai tat ca AI modules."""
     result = {"modules": {}}
@@ -1997,7 +1991,7 @@ async def ai_dashboard():
 #  DAILY REPORTS
 # ============================================
 
-@app.get("/api/reports/latest")
+@api_router.get("/api/reports/latest")
 async def api_reports_latest():
     """Lấy báo cáo mới nhất (full data)."""
     try:
@@ -2013,7 +2007,7 @@ async def api_reports_latest():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/reports/history")
+@api_router.get("/api/reports/history")
 async def api_reports_history(limit: int = 30, offset: int = 0):
     """Lấy danh sách reports (metadata only)."""
     try:
@@ -2028,7 +2022,7 @@ async def api_reports_history(limit: int = 30, offset: int = 0):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/reports/{report_id}")
+@api_router.get("/api/reports/{report_id}")
 async def api_reports_detail(report_id: str):
     """Lấy report chi tiết theo ID."""
     try:
@@ -2044,7 +2038,7 @@ async def api_reports_detail(report_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/reports/generate")
+@api_router.post("/api/reports/generate", dependencies=[Depends(require_permission("overview"))])
 async def api_reports_generate():
     """Generate báo cáo mới ngay lập tức."""
     try:
@@ -2061,7 +2055,7 @@ class ReportToggleRequest(BaseModel):
     nightly: Optional[bool] = None
 
 
-@app.post("/api/reports/toggle")
+@api_router.post("/api/reports/toggle", dependencies=[Depends(require_permission("overview"))])
 async def api_reports_toggle(req: ReportToggleRequest):
     """Bật/tắt auto-report."""
     try:
@@ -2077,6 +2071,9 @@ async def api_reports_toggle(req: ReportToggleRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Include all protected core API routes
+app.include_router(api_router)
 
 # ============================================
 #  SERVER

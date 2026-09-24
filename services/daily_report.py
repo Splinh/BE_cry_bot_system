@@ -20,6 +20,10 @@ from loguru import logger
 
 from data.database import db
 from notifiers.telegram_bot import TelegramNotifier
+from core.security import SecurityManager
+
+# Múi giờ chuẩn Việt Nam (UTC+7)
+VN_TZ = timezone(timedelta(hours=7))
 
 
 # ============================================
@@ -35,6 +39,7 @@ class DailyReportService:
         self.trade_engine = trade_engine
         self.macro_calendar = macro_calendar
         self.notifier = TelegramNotifier()
+        self.security = SecurityManager()
         self._auto_morning = True    # Bật/tắt report buổi sáng (08:00)
         self._auto_nightly = True    # Bật/tắt report cuối ngày (23:59)
         self._running = False
@@ -50,7 +55,7 @@ class DailyReportService:
         stats = db.get_stats()
         balance = db.get_balance()
         open_positions = db.get_open_positions()
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_str = datetime.now(VN_TZ).strftime("%Y-%m-%d")
 
         # Lệnh đóng hôm nay
         conn = db._get_conn()
@@ -197,7 +202,7 @@ class DailyReportService:
         Xây dựng báo cáo đầy đủ.
         report_type: 'morning' | 'daily' | 'custom'
         """
-        now = datetime.now()
+        now = datetime.now(VN_TZ)
         trading = self._collect_trading_data()
         market, macro = await asyncio.gather(
             self._collect_market_data(),
@@ -380,11 +385,9 @@ class DailyReportService:
             text = self.format_daily_report(report)
 
         # Gửi tới tất cả admin + whitelisted users
-        from core.security import SecurityManager
-        sec = SecurityManager()
         target_ids = list(set(
-            sec.config.get("admin_ids", []) +
-            sec.config.get("whitelist_ids", [])
+            self.security.config.get("admin_ids", []) +
+            self.security.config.get("whitelist_ids", [])
         ))
 
         if not target_ids:
@@ -476,13 +479,10 @@ class DailyReportService:
 
 
 # ============================================
-#  SCHEDULER (chạy nền)
-# ============================================
 #  SCHEDULER LOOP (UTC+7 Aware & Drift-Resistant)
 # ============================================
 
 _report_service: Optional[DailyReportService] = None
-VN_TZ = timezone(timedelta(hours=7))
 
 
 def get_report_service() -> DailyReportService:
@@ -532,17 +532,19 @@ async def run_report_scheduler():
                     and service._auto_morning
                     and last_morning != today_str):
                 logger.info(f"☀️ [Report] Đang tạo và gửi Morning Report ({today_str})...")
-                last_morning = today_str
-                await service.send_report("morning")
+                res = await service.send_report("morning")
+                if res:
+                    last_morning = today_str
 
-            # Nightly report: trong khoảng 23:55 -> 23:59 (hoặc 00:00 - 00:05 bù cho ngày trước)
+            # Nightly report: trong khoảng 23:55 -> 23:59 UTC+7
             is_night_window = (now.hour == 23 and now.minute >= 55)
             if (is_night_window
                     and service._auto_nightly
                     and last_nightly != today_str):
                 logger.info(f"📊 [Report] Đang tạo và gửi Nightly Report ({today_str})...")
-                last_nightly = today_str
-                await service.send_report("daily")
+                res = await service.send_report("daily")
+                if res:
+                    last_nightly = today_str
 
             await asyncio.sleep(20)
         except Exception as e:

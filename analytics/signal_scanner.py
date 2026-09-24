@@ -493,24 +493,26 @@ class SignalScanner:
                                     signal["direction"] = "NEUTRAL"
 
                             last_dir = self.last_signals.get(key)
+                            is_first_scan = (last_dir is None)
                             
                             # Nếu là lần quét đầu tiên cho cặp này/khung này, ghi nhận trạng thái nền
-                            if last_dir is None:
+                            if is_first_scan:
                                 self.last_signals[key] = direction
                                 logger.debug(f"Khởi tạo trạng thái ban đầu cho {key}: {direction}")
+                                if direction == "NEUTRAL":
+                                    continue
+                            elif direction == last_dir:
                                 continue
-                            
-                            # Phát hiện sự thay đổi tín hiệu (đảo chiều)
-                            if direction != last_dir:
+                            else:
                                 logger.warning(f"🚨 Phát hiện đảo chiều tín hiệu trên {key}: {last_dir} -> {direction}")
                                 self.last_signals[key] = direction
                                 
-                                # Chỉ gửi thông báo khi có tín hiệu cụ thể LONG hoặc SHORT
-                                if direction in ("LONG", "SHORT"):
-                                    coin_name = symbol.split("/")[0].upper()
-                                    if coin_name not in ("BTC", "ETH"):
-                                        logger.info(f"⏭️ [Scanner] Bỏ qua thông báo và giao dịch Futures cho {coin_name} (chỉ chấp nhận BTC/ETH)")
-                                        continue
+                            # Chỉ xử lý khi có tín hiệu cụ thể LONG hoặc SHORT
+                            if direction in ("LONG", "SHORT"):
+                                coin_name = symbol.split("/")[0].upper()
+                                if coin_name not in ("BTC", "ETH"):
+                                    logger.info(f"⏭️ [Scanner] Bỏ qua thông báo và giao dịch Futures cho {coin_name} (chỉ chấp nhận BTC/ETH)")
+                                    continue
                                     reasons = signal.get("reasons", [])
                                     reasons_str = ", ".join(reasons) if reasons else "Chỉ báo kỹ thuật đảo chiều"
                                     
@@ -625,32 +627,35 @@ class SignalScanner:
                                     if warn_parts:
                                         ai_notes = " | ⚠️ " + " | ".join(str(w) for w in warn_parts[:2])
 
-                                    # 1. Gửi Telegram Notifier
-                                    logger.info(f"📨 Đang gửi tín hiệu Telegram cho {key}...")
-                                    await self.tg_notifier.send_signal(
-                                        coin=f"{coin_name} ({tf})",
-                                        direction=direction,
-                                        entry=entry,
-                                        sl=smart_sl,
-                                        tp=smart_tp3,
-                                        reason=html.escape(reasons_str + ai_notes),
-                                        rating=rating
-                                    )
-                                    
-                                    # 2. Gửi Zalo Notifier (nếu có cấu hình)
-                                    zalo_text = (
-                                        f"🚨 PHÁT HIỆN TÍN HIỆU ĐẢO CHIỀU ({tf.upper()})\n"
-                                        f"━━━━━━━━━━━━━━━━━━\n"
-                                        f"🪙 Coin: {coin_name}\n"
-                                        f"👉 Hướng: {direction}\n"
-                                        f"⭐ Độ tin cậy: {'⭐' * rating}\n"
-                                        f"📍 Entry: ${entry:,.4f}\n"
-                                        f"🛑 Stop Loss: ${smart_sl:,.4f}\n"
-                                        f"🎯 Take Profit: ${smart_tp3:,.4f}\n"
-                                        f"💡 Lý do: {reasons_str}{ai_notes}\n"
-                                        f"━━━━━━━━━━━━━━━━━━"
-                                    )
-                                    await self.zalo_notifier.send_message(zalo_text)
+                                    # Gửi thông báo khi có đảo chiều hoặc tín hiệu khởi đầu mạnh (>= 4 sao)
+                                    should_notify = (not is_first_scan) or (is_first_scan and rating >= 4)
+                                    if should_notify:
+                                        # 1. Gửi Telegram Notifier
+                                        logger.info(f"📨 Đang gửi tín hiệu Telegram cho {key}...")
+                                        await self.tg_notifier.send_signal(
+                                            coin=f"{coin_name} ({tf})",
+                                            direction=direction,
+                                            entry=entry,
+                                            sl=smart_sl,
+                                            tp=smart_tp3,
+                                            reason=html.escape(reasons_str + ai_notes),
+                                            rating=rating
+                                        )
+                                        
+                                        # 2. Gửi Zalo Notifier (nếu có cấu hình)
+                                        zalo_text = (
+                                            f"🚨 PHÁT HIỆN TÍN HIỆU ({tf.upper()})\n"
+                                            f"━━━━━━━━━━━━━━━━━━\n"
+                                            f"🪙 Coin: {coin_name}\n"
+                                            f"👉 Hướng: {direction}\n"
+                                            f"⭐ Độ tin cậy: {'⭐' * rating}\n"
+                                            f"📍 Entry: ${entry:,.4f}\n"
+                                            f"🛑 Stop Loss: ${smart_sl:,.4f}\n"
+                                            f"🎯 Take Profit: ${smart_tp3:,.4f}\n"
+                                            f"💡 Lý do: {reasons_str}{ai_notes}\n"
+                                            f"━━━━━━━━━━━━━━━━━━"
+                                        )
+                                        await self.zalo_notifier.send_message(zalo_text)
                                     
                         except Exception as inner_e:
                             logger.error(f"Lỗi xử lý kết quả {key}: {inner_e}")

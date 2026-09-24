@@ -1,9 +1,14 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from data.database import db
+from api.auth import require_permission
 
-router = APIRouter(prefix="/api/gamefi", tags=["GameFi"])
+router = APIRouter(
+    prefix="/api/gamefi",
+    tags=["GameFi"],
+    dependencies=[Depends(require_permission("gamefi"))]
+)
 
 # ============================================
 #  GAMEFI KNOWLEDGE BASE

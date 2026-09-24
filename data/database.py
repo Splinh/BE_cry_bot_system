@@ -524,10 +524,10 @@ class Database:
         conn = self._get_conn()
         count = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
         if count == 0:
-            import hashlib, secrets
-            salt = secrets.token_hex(16)
-            hashed = hashlib.sha256((salt + "admin123").encode()).hexdigest()
-            password_hash = f"{salt}${hashed}"
+            from passlib.context import CryptContext
+            pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+            initial_password = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin123")
+            password_hash = pwd_ctx.hash(initial_password)
             all_permissions = json.dumps([
                 "overview", "trading", "analysis", "social",
                 "wallets", "gems", "gamefi", "security", "users"
@@ -537,7 +537,7 @@ class Database:
                 ("admin", "admin@system.local", password_hash, "admin", "approved", all_permissions, 1)
             )
             conn.commit()
-            logger.success("[SEED] Default admin created (admin / admin123)")
+            logger.success("[SEED] Default admin created (username: admin)")
 
     def create_user(self, username: str, email: str, password_hash: str, 
                     role: str = "user", status: str = "pending") -> dict:

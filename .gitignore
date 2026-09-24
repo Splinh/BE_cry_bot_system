@@ -18,3 +18,7 @@ venv/
 .venv/
 sessions/
 reset_pw.py
+*.key
+*.enc
+data/wallets/*.key
+data/wallets/*.enc

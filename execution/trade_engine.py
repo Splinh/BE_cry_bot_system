@@ -5,9 +5,11 @@ Tu dong tinh PnL, chot loi, cat lo.
 """
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from loguru import logger
 from typing import Optional
+
+VN_TZ = timezone(timedelta(hours=7))
 
 from core.config import Config
 
@@ -219,12 +221,15 @@ class TradeEngine:
         self._roll_daily()
         return self.daily_realized_pnl <= -self.daily_loss_limit_usd()
 
-    def can_open_position(self, margin_required: float) -> tuple:
+    def can_open_position(self, margin_required: float, leverage: int = 1) -> tuple:
         """
         Kiem tra tat ca hard cap truoc khi mo lenh.
         Return (ok: bool, reason: str). reason rong neu ok.
         """
         self._roll_daily()
+
+        if leverage < 1 or leverage > self.max_leverage:
+            return False, f"Đòn bẩy {leverage}x vượt giới hạn an toàn (cho phép 1-{self.max_leverage}x)."
 
         if self.is_trading_locked():
             return False, (f"Da cham gioi han lo/ngay "
@@ -553,7 +558,7 @@ class TradeEngine:
             self.sync_binance_balance()
 
         # Enforce Risk Guards
-        ok, reason = self.can_open_position(margin_required)
+        ok, reason = self.can_open_position(margin_required, leverage=leverage)
         if not ok:
             self.last_error = reason
             logger.warning(f"Manual trade blocked: {reason}")
@@ -712,7 +717,7 @@ class TradeEngine:
             "usdt_size": usdt_size,
             "leverage": leverage,
             "margin": round(margin_required, 2),
-            "open_time": datetime.now().isoformat(),
+            "open_time": datetime.now(VN_TZ).isoformat(),
             "close_time": None,
             "close_price": 0.0,
             "pnl": 0.0,
@@ -863,7 +868,7 @@ class TradeEngine:
             self.sync_binance_balance()
 
         # Enforce Risk Guards
-        ok, reason = self.can_open_position(margin_required)
+        ok, reason = self.can_open_position(margin_required, leverage=leverage)
         if not ok:
             logger.warning(f"Auto trade blocked: {reason}")
             msg_blocked = (
@@ -912,7 +917,7 @@ class TradeEngine:
             "usdt_size": usdt_size,
             "leverage": leverage,
             "margin": round(margin_required, 2),
-            "open_time": datetime.now().isoformat(),
+            "open_time": datetime.now(VN_TZ).isoformat(),
             "close_time": None,
             "close_price": 0.0,
             "pnl": 0.0,
@@ -1051,11 +1056,11 @@ class TradeEngine:
             pos["fees_paid"] = round(pos.get("fees_paid", 0.0) + close_fee, 4)
 
         pos["status"] = "CLOSED"
-        pos["close_time"] = datetime.now().isoformat()
+        pos["close_time"] = datetime.now(VN_TZ).isoformat()
         pos["close_price"] = close_price
         pos["close_reason"] = reason
         pos["pnl"] += pnl
-        pos["_closed_at"] = datetime.now().isoformat()
+        pos["_closed_at"] = datetime.now(VN_TZ).isoformat()
 
         logger.info(f"TRADE DONG LENH: {sig_key} | Ly do: {reason} | PnL phan cuoi: ${pnl:.2f} | Fees phan cuoi: ${close_fee if not is_live else 0:.4f} | Tong PnL: ${pos['pnl']:.2f} | Live: {is_live}")
 

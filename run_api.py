@@ -49,6 +49,46 @@ def main():
     logger.success("API server starting on port 8000 (API-only mode, no Telegram bot)")
 
     async def start():
+        # Khoi dong Daily Report Service + Scheduler
+        try:
+            from services.daily_report import init_report_service, run_report_scheduler
+            init_report_service(
+                trade_engine=trade_engine,
+                macro_calendar=getattr(signal_tracker, 'macro_calendar', None),
+            )
+            asyncio.create_task(run_report_scheduler())
+            logger.info("Daily Report Scheduler da khoi dong (08:00 & 23:59 UTC+7).")
+        except Exception as e:
+            logger.error(f"Khong the khoi dong Daily Report Service: {e}")
+
+        # Khoi dong Signal Tracker
+        try:
+            signal_tracker.start()
+            logger.info("Signal Tracker da khoi dong.")
+        except Exception as e:
+            logger.error(f"Khong the khoi dong Signal Tracker: {e}")
+
+        # Khoi dong Realtime Signal Scanner (quet moi 5 phut)
+        signal_scanner_service = None
+        try:
+            from analytics.signal_scanner import SignalScanner
+            signal_scanner_service = SignalScanner(
+                interval_seconds=300,
+                trade_engine=trade_engine,
+                signal_tracker=signal_tracker
+            )
+            signal_scanner_service.start()
+            logger.info("Realtime Signal Scanner da khoi dong (quet moi 5 phut).")
+        except Exception as e:
+            logger.error(f"Khong the khoi dong Signal Scanner: {e}")
+
+        # Khoi dong Listing Scanner
+        try:
+            listing_scanner.start()
+            logger.info("Listing Scanner da khoi dong.")
+        except Exception as e:
+            logger.debug(f"Listing Scanner khoi dong loi: {e}")
+
         api_task = asyncio.create_task(run_server(port=8000))
         # Keep alive + uptime counter
         while True:

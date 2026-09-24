@@ -36,13 +36,17 @@ class WalletManager:
         self.wallets: list[dict] = self._load_wallets()
 
     def _get_cipher(self) -> Fernet:
-        """Tao hoac doc encryption key."""
+        """Tao hoac doc encryption key (uu tien tu bien moi truong WALLET_ENCRYPTION_KEY)."""
+        env_key = os.getenv("WALLET_ENCRYPTION_KEY")
+        if env_key:
+            return Fernet(env_key.encode() if isinstance(env_key, str) else env_key)
+        
         if KEY_FILE.exists():
             key = KEY_FILE.read_bytes()
         else:
             key = Fernet.generate_key()
             KEY_FILE.write_bytes(key)
-            logger.info("Da tao encryption key moi.")
+            logger.info("Da tao encryption key moi tai KEY_FILE.")
         return Fernet(key)
 
     def _encrypt(self, data: str) -> str:

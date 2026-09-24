@@ -22,6 +22,10 @@ except ImportError:
 
 from data.database import db
 
+from passlib.context import CryptContext
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 # ============================================
 #  CONFIG
 # ============================================
@@ -31,16 +35,21 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = 24
 
 def hash_password(password: str) -> str:
-    salt = secrets.token_hex(16)
-    hashed = hashlib.sha256((salt + password).encode()).hexdigest()
-    return f"{salt}${hashed}"
+    """Hash password su dung bcrypt."""
+    return pwd_context.hash(password)
 
 def verify_password(password: str, stored_hash: str) -> bool:
+    """Xac thuc mat khau voi ho tro ca bcrypt va legacy sha256."""
     try:
-        salt, hashed = stored_hash.split("$", 1)
-        return hashlib.sha256((salt + password).encode()).hexdigest() == hashed
+        if stored_hash.startswith("$2b$") or stored_hash.startswith("$2a$"):
+            return pwd_context.verify(password, stored_hash)
+        # Fallback ho tro legacy format: salt$sha256
+        if "$" in stored_hash:
+            salt, hashed = stored_hash.split("$", 1)
+            return hashlib.sha256((salt + password).encode()).hexdigest() == hashed
     except Exception:
         return False
+    return False
 
 security_scheme = HTTPBearer(auto_error=False)
 
@@ -79,26 +88,43 @@ def verify_token(token: str) -> dict:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("exp", 0) < time.time():
-            raise HTTPException(401, "Token het han")
+            raise HTTPException(401, "Token da het han")
         return payload
     except JWTError:
-        raise HTTPException(401, "Token khong hop le")
+        raise HTTPException(401, "Token khong hop le hoac bi tu choi")
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme)
 ) -> dict:
-    """FastAPI dependency: lay user tu JWT token."""
+    """FastAPI dependency: lay user tu JWT token va bat buoc kiem tra is_active/status."""
     if not credentials:
-        raise HTTPException(401, "Chua dang nhap")
+        raise HTTPException(401, "Chua dang nhap (thieu Bearer token)")
     
     payload = verify_token(credentials.credentials)
     user_id = int(payload.get("sub", 0))
     
     user = db.get_user_by_id(user_id)
     if not user:
-        raise HTTPException(401, "User khong ton tai")
+        raise HTTPException(401, "Tai khoan khong ton tai")
+    
+    if not user.get("is_active"):
+        raise HTTPException(403, "Tai khoan da bi khoa hoac vo hieu hoa")
+        
+    if user.get("status") != "approved":
+        raise HTTPException(403, f"Tai khoan dang o trang thai '{user.get('status')}', chua duoc chap thuan")
     
     return user
+
+def require_permission(permission: str):
+    """Dependency kiem tra user co quyen permission cu the hoac la admin."""
+    async def _checker(user: dict = Depends(get_current_user)):
+        if user.get("role") == "admin":
+            return user
+        perms = parse_permissions(user)
+        if permission not in perms:
+            raise HTTPException(403, f"Ban khong co quyen truy cap '{permission}'")
+        return user
+    return _checker
 
 async def require_admin(
     user: dict = Depends(get_current_user)

@@ -2750,7 +2750,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 #  DAILY REPORT COMMAND
 # ============================================
 
-@requires_whitelist
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lệnh /report — Xem/quản lý báo cáo hiệu suất trading."""
     if not update.effective_chat:
