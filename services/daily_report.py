@@ -287,8 +287,14 @@ class DailyReportService:
             lines.append(f"📋 <b>Vị thế đang mở:</b>")
             for pos in t["open_positions_detail"][:5]:
                 dir_emoji = "🟢" if pos["direction"] == "LONG" else "🔴"
-                pnl_str = f"+${pos['pnl']:.2f}" if pos["pnl"] >= 0 else f"-${abs(pos['pnl']):.2f}"
-                lines.append(f"  {dir_emoji} {pos['coin']} {pos['direction']} | Entry: ${pos['entry']:,.2f} | PnL: {pnl_str}")
+                entry_val = pos.get("entry", 0)
+                entry_str = f"${entry_val:,.6f}" if 0 < entry_val < 0.01 else f"${entry_val:,.2f}"
+                pnl_val = pos.get("pnl", 0)
+                if abs(pnl_val) < 0.01 and pnl_val != 0:
+                    pnl_str = f"+${pnl_val:.4f}" if pnl_val > 0 else f"-${abs(pnl_val):.4f}"
+                else:
+                    pnl_str = f"+${pnl_val:,.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):,.2f}"
+                lines.append(f"  {dir_emoji} {pos['coin']} {pos['direction']} | Entry: {entry_str} | PnL: {pnl_str}")
 
         lines.append(f"━━━━━━━━━━━━━━━━━━")
         return "\n".join(lines)

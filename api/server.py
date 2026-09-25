@@ -568,35 +568,101 @@ async def open_manual_trade(req: ManualTradeReq):
 
 @api_router.post("/api/trading/close/{sig_key}", dependencies=[Depends(require_permission("trading"))])
 def close_position_web(sig_key: str):
-    """Dong lenh tu Web Dashboard."""
+    """Dong lenh tu Web Dashboard (ho tro ca CEX futures/spot lan DEX GEM token)."""
     te = ctx["trade_engine"]
     if not te: raise HTTPException(500, "No trade engine")
     
     if sig_key not in te.positions:
         raise HTTPException(404, "Khong tim thay lenh")
     
-    prices = _get_latest_prices()
     pos = te.positions[sig_key]
-    symbol = f"{pos['coin']}USDT"
-    current_price = prices.get(symbol, {}).get("price", 0)
-    
-    # Fallback: lay truc tiep tu Binance
-    if current_price <= 0:
-        for host in ["api.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com"]:
+    pos_type = pos.get("type", "FUTURES")
+    pair_address = pos.get("pair_address")
+    current_price = 0.0
+
+    # 1. Neu la GEM token: Lay gia tu DexScreener
+    if pos_type == "GEM" and pair_address:
+        gem_prices = _fetch_gem_prices(te)
+        if pair_address in gem_prices and gem_prices[pair_address].get("price"):
+            current_price = float(gem_prices[pair_address]["price"])
+        else:
             try:
-                resp = httpx.get(f"https://{host}/api/v3/ticker/price",
-                                params={"symbol": symbol}, timeout=5)
+                chain = pos.get("chain", "solana").lower()
+                resp = httpx.get(f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair_address}", timeout=5)
                 if resp.status_code == 200:
-                    current_price = float(resp.json().get("price", 0))
-                    break
-            except Exception:
-                pass
+                    data = resp.json()
+                    pair = data.get("pair") or (data.get("pairs", [{}])[0] if data.get("pairs") else {})
+                    if pair and pair.get("priceUsd"):
+                        current_price = float(pair["priceUsd"])
+            except Exception as e:
+                logger.warning(f"Failed to fetch DexScreener price for {pair_address}: {e}")
+        
+        # Fallback cho GEM: neu liquidity bi rut sach hoac token dead, cho phep dong o gia gan nhat hoac 0
+        if current_price <= 0:
+            current_price = float(pos.get("current_price") or 0.0)
+    else:
+        # 2. Vị thế CEX
+        prices = _get_latest_prices()
+        symbol = f"{pos['coin']}USDT"
+        current_price = prices.get(symbol, {}).get("price", 0)
+        
+        # Fallback: lay truc tiep tu Binance
+        if current_price <= 0:
+            for host in ["api.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com"]:
+                try:
+                    resp = httpx.get(f"https://{host}/api/v3/ticker/price",
+                                    params={"symbol": symbol}, timeout=5)
+                    if resp.status_code == 200:
+                        current_price = float(resp.json().get("price", 0))
+                        break
+                except Exception:
+                    pass
     
-    if current_price <= 0:
-        raise HTTPException(400, "Khong lay duoc gia hien tai")
+    # Neu la GEM token da chet/rugpull (gia = 0), van cho phep dong de cat lo hoan toan va giai phong slot
+    if current_price <= 0 and pos_type != "GEM":
+        raise HTTPException(400, "Khong lay duoc gia hien tai de dong lenh CEX")
     
-    te.close_position(sig_key, current_price, reason="WEB_CLOSE")
-    return {"success": True, "close_price": current_price}
+    closed_pos = te.close_position(sig_key, current_price, reason="WEB_CLOSE")
+    
+    # Xoa khoi active_signals neu dang co trong tracker
+    tracker = ctx.get("signal_tracker")
+    if tracker and hasattr(tracker, "remove_signal"):
+        try:
+            tracker.remove_signal(sig_key)
+        except Exception:
+            pass
+
+    return {"success": True, "close_price": current_price, "position": closed_pos}
+
+@api_router.delete("/api/trading/position/{sig_key}", dependencies=[Depends(require_permission("trading"))])
+def force_delete_position(sig_key: str):
+    """Xoa/cuong che dong vi the khoi danh sach open positions (emergency cleanup)."""
+    te = ctx["trade_engine"]
+    if not te: raise HTTPException(500, "No trade engine")
+    
+    if sig_key in te.positions:
+        p = te.positions.pop(sig_key)
+        te._save_data()
+    else:
+        p = None
+        
+    # Xoa trong SQLite DB
+    try:
+        from data.database import db as sqlite_db
+        if sqlite_db:
+            sqlite_db.delete_position(sig_key)
+    except Exception as e:
+        logger.error(f"Error deleting position from SQLite: {e}")
+        
+    # Xoa khoi signal tracker
+    tracker = ctx.get("signal_tracker")
+    if tracker and hasattr(tracker, "remove_signal"):
+        try:
+            tracker.remove_signal(sig_key)
+        except Exception:
+            pass
+            
+    return {"success": True, "deleted_key": sig_key, "previous_position": p}
 
 # ============================================
 #  NAP / RUT TIEN

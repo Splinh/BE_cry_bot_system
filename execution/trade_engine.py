@@ -357,8 +357,32 @@ class TradeEngine:
                 continue
 
             coin = pos.get("coin", "")
-            symbol = f"{coin}USDT"
-            current_price = prices.get(symbol, {}).get("price", 0)
+            current_price = 0.0
+
+            # 1. Neu la GEM token: Lay gia tu DexScreener
+            if pos.get("type") == "GEM" and pos.get("pair_address"):
+                pa = pos["pair_address"]
+                if f"GEM_{pa}" in prices:
+                    current_price = float(prices[f"GEM_{pa}"].get("price", 0))
+                elif pa in prices:
+                    current_price = float(prices[pa].get("price", 0))
+                else:
+                    try:
+                        import httpx
+                        chain = pos.get("chain", "solana").lower()
+                        resp = httpx.get(f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pa}", timeout=3)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            pair = data.get("pair") or (data.get("pairs", [{}])[0] if data.get("pairs") else {})
+                            if pair and pair.get("priceUsd"):
+                                current_price = float(pair["priceUsd"])
+                    except Exception:
+                        pass
+            else:
+                # 2. Coin CEX
+                symbol = f"{coin}USDT"
+                current_price = prices.get(symbol, {}).get("price", 0)
+
             if current_price <= 0:
                 continue
 
@@ -863,6 +887,13 @@ class TradeEngine:
 
         # Mo lenh
         margin_required = usdt_size / leverage
+
+        # Tu dong downsize neu margin yeu cau vuot cap (de khong bi can_open_position tu choi lenh chat luong cao)
+        margin_cap = min(self.max_margin_per_trade_usd, self.balance * self.max_margin_per_trade_pct)
+        if margin_required > margin_cap:
+            logger.info(f"Auto-trade: Margin ${margin_required:.2f} vuot cap ${margin_cap:.2f} -> Tu dong downsize ve ${margin_cap:.2f}")
+            margin_required = margin_cap
+            usdt_size = round(margin_required * leverage, 2)
 
         if is_live:
             self.sync_binance_balance()
