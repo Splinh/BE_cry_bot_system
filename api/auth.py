@@ -110,7 +110,7 @@ async def get_current_user(
     if not user.get("is_active"):
         raise HTTPException(403, "Tai khoan da bi khoa hoac vo hieu hoa")
         
-    if user.get("status") != "approved":
+    if user.get("status") not in ("approved", "active"):
         raise HTTPException(403, f"Tai khoan dang o trang thai '{user.get('status')}', chua duoc chap thuan")
     
     return user
