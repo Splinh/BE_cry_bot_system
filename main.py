@@ -2840,6 +2840,46 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def cmd_scenario(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /scenario hoặc /kichban: Xem hoặc cài đặt kịch bản giao dịch."""
+    msg_target = update.message or (update.callback_query.message if update.callback_query else None)
+    if not msg_target:
+        return
+
+    from analytics.scenario_manager import ScenarioManager
+    sm = ScenarioManager(trade_engine=trade_engine, signal_tracker=signal_tracker)
+
+    args = context.args if context and context.args else []
+    if args:
+        subcmd = args[0].lower()
+        if subcmd == "auto" and len(args) > 1:
+            mode = args[1].lower()
+            if mode in ("on", "bat", "1", "true"):
+                sm.toggle_global_auto_trade(True)
+                Config.SCENARIO_AUTO_TRADE = True
+                await msg_target.reply_text("🟢 <b>Đã BẬT</b> chế độ Tự động vào lệnh (Auto-Trade) theo kịch bản!", parse_mode="HTML")
+                return
+            elif mode in ("off", "tat", "0", "false"):
+                sm.toggle_global_auto_trade(False)
+                Config.SCENARIO_AUTO_TRADE = False
+                await msg_target.reply_text("🔴 <b>Đã TẮT</b> chế độ Tự động vào lệnh theo kịch bản! (Chỉ gửi thông báo cảnh báo)", parse_mode="HTML")
+                return
+
+    # Lấy giá BTC hiện tại
+    btc_price = 0.0
+    try:
+        from data_ingestion.binance_ws import BinanceWebSocket
+        ws = BinanceWebSocket()
+        data = await ws.get_price_once("btcusdt")
+        if data:
+            btc_price = float(data.get("price", 0.0))
+    except Exception:
+        pass
+
+    text = sm.format_status_message(btc_price)
+    await msg_target.reply_text(text, parse_mode="HTML")
+
+
 async def handle_menu_text_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xu ly khi nguoi dung nhan nut tren Persistent Keyboard cu de dieu huong va xoa ban phim cu."""
     if not update.message or not update.message.text:
@@ -2872,6 +2912,8 @@ async def handle_menu_text_button(update: Update, context: ContextTypes.DEFAULT_
         await cmd_signals(update, context)
     elif "Cảnh Báo" in text:
         await cmd_alerts(update, context)
+    elif "Kịch Bản" in text or "Kịch bản" in text:
+        await cmd_scenario(update, context)
     elif "Hướng Dẫn" in text:
         await cmd_help(update, context)
     elif "Hỏi AI" in text:
@@ -2964,6 +3006,10 @@ def main():
     # Daily Report command
     app.add_handler(CommandHandler("report", requires_whitelist(cmd_report)))
 
+    # Scenario commands
+    app.add_handler(CommandHandler("scenario", requires_whitelist(cmd_scenario)))
+    app.add_handler(CommandHandler("kichban", requires_whitelist(cmd_scenario)))
+
     # AI Chatbox commands
     app.add_handler(CommandHandler("ask", requires_whitelist(cmd_ask)))
     app.add_handler(CommandHandler("ai", requires_whitelist(cmd_ask)))
@@ -2983,6 +3029,7 @@ def main():
         r"|(📖\s*)?Hướng Dẫn"
         r"|(🤖\s*)?Menu Chính"
         r"|(🤖\s*)?Hỏi AI"
+        r"|(🎯\s*)?Kịch Bản"
     )
     menu_filter = filters.Regex(re.compile(menu_pattern, re.IGNORECASE))
     app.add_handler(MessageHandler(menu_filter, requires_whitelist(handle_menu_text_button)))
@@ -3039,6 +3086,7 @@ def main():
         try:
             await app.bot.set_my_commands([
                 BotCommand("start", "Menu chính"),
+                BotCommand("scenario", "Kịch bản giao dịch & Auto-Trade"),
                 BotCommand("ask", "Hỏi Trợ lý AI"),
                 BotCommand("chat", "Quản lý phiên hỏi AI"),
                 BotCommand("model", "Xem/đổi model AI"),

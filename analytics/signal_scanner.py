@@ -628,7 +628,8 @@ class SignalScanner:
                                     ai_notes = " | ⚠️ " + " | ".join(str(w) for w in warn_parts[:2])
 
                                 # Gửi thông báo khi có đảo chiều hoặc tín hiệu khởi đầu mạnh (>= 4 sao)
-                                should_notify = (not is_first_scan) or (is_first_scan and rating >= 4)
+                                # CHỈ gửi nếu cấu hình BROADCAST_SCANNER_SIGNALS bật (mặc định tắt để tránh spam kênh, chỉ trả khi user gõ lệnh)
+                                should_notify = Config.BROADCAST_SCANNER_SIGNALS and ((not is_first_scan) or (is_first_scan and rating >= 4))
                                 if should_notify:
                                     # 1. Gửi Telegram Notifier
                                     logger.info(f"📨 Đang gửi tín hiệu Telegram cho {key}...")
