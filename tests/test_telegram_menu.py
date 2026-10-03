@@ -151,11 +151,76 @@ async def test_guide_routing():
     print("-" * 50)
 
 
+async def test_menu_button_not_parsed_as_token():
+    print("=== TESTING MENU BUTTONS ARE NOT PARSED AS TOKEN ===")
+    
+    mock_chat = MagicMock(spec=Chat)
+    mock_chat.id = 123456
+    mock_chat.type = "private"
+    
+    for button_text in ["💼 Quản Lý Ví", "📊 Quét Coins", "📈 Ví Giả Lập", "🛡️ Bảo Mật", "Tin tức"]:
+        mock_msg = MagicMock(spec=Message)
+        mock_msg.text = button_text
+        mock_msg.reply_text = AsyncMock()
+        
+        mock_update = MagicMock(spec=Update)
+        mock_update.effective_chat = mock_chat
+        mock_update.message = mock_msg
+        mock_update.callback_query = None
+        
+        mock_context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+        
+        # analyze_token should return None immediately and not send "Dang phan tich..."
+        await main.analyze_token(mock_update, mock_context)
+        assert not mock_msg.reply_text.called, f"Error: analyze_token replied to menu button '{button_text}'!"
+    
+    print("OK: All menu button texts correctly rejected by analyze_token.")
+    print("-" * 50)
+
+
+async def test_wallet_button_routing():
+    print("=== TESTING WALLET BUTTON ROUTING ===")
+    
+    mock_message = MagicMock(spec=Message)
+    mock_message.text = "💼 Quản Lý Ví"
+    mock_message.reply_text = AsyncMock()
+    
+    mock_chat = MagicMock(spec=Chat)
+    mock_chat.id = 123456
+    mock_chat.type = "private"
+    
+    mock_update = MagicMock(spec=Update)
+    mock_update.effective_chat = mock_chat
+    mock_update.message = mock_message
+    mock_update.callback_query = None
+    
+    mock_context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+    
+    original_cmd_wallets = main.cmd_wallets
+    cmd_wallets_called = False
+    
+    async def mock_cmd_wallets(update, context):
+        nonlocal cmd_wallets_called
+        cmd_wallets_called = True
+        
+    main.cmd_wallets = mock_cmd_wallets
+    
+    try:
+        await main.handle_menu_text_button(mock_update, mock_context)
+        assert cmd_wallets_called, "Error: handle_menu_text_button did not route to cmd_wallets!"
+        print("OK: '💼 Quản Lý Ví' successfully routed to cmd_wallets.")
+    finally:
+        main.cmd_wallets = original_cmd_wallets
+    print("-" * 50)
+
+
 async def run_all():
     await test_group_mention_filter()
     await test_inline_keyboard_rendering()
     await test_persistent_keyboard_routing()
     await test_guide_routing()
+    await test_menu_button_not_parsed_as_token()
+    await test_wallet_button_routing()
     print("ALL TESTS PASSED SUCCESSFULLY!")
 
 

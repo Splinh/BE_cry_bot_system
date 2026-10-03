@@ -17,7 +17,7 @@ from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from loguru import logger
 
@@ -252,13 +252,29 @@ async def analyze_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = raw_text.upper()
 
-    # Loc ky tu, chi giu lai chu cai
-    token = re.sub(r'[^A-Z0-9]', '', text)
-    if not token or len(token) > 10:
-        return  # Bo qua tin nhan khong hop le
+    # Bo qua neu co khoang trang hoac ky tu khong hop le (tranh phan tich nham cau thoai, nut menu)
+    if " " in text:
+        return
 
+    # Chuan hoa tien to/hau to ($BTC, BTC/USDT, BTCUSDT)
+    if text.startswith("$"):
+        text = text[1:].strip()
+    if text.endswith("/USDT"):
+        text = text[:-5].strip()
+    elif text.endswith("USDT") and len(text) > 4:
+        text = text[:-4].strip()
+
+    # Chi chap nhan ma coin thuan ky tu chu/so ASCII do dai 2-10 (VD: BTC, ETH, SOL, PEPE, 1000SATS)
+    if not re.fullmatch(r'^[A-Z0-9]{2,10}$', text):
+        return
+
+    token = text
     if token in ("GOLD", "XAU"):
         token = "PAXG"
+
+    # Bo qua cac tu dieu huong co ban
+    if token in ("MENU", "HELP", "START", "CANCEL"):
+        return
 
     symbol = f"{token}/USDT"
     symbol_raw = f"{token}USDT"
@@ -2824,6 +2840,46 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def handle_menu_text_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xu ly khi nguoi dung nhan nut tren Persistent Keyboard cu de dieu huong va xoa ban phim cu."""
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text.strip()
+
+    # Xoa persistent keyboard cu khoi Telegram client cua user
+    try:
+        if hasattr(update.message, "reply_text"):
+            res = update.message.reply_text(
+                "🔄 Đang mở chức năng...",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            if asyncio.iscoroutine(res):
+                await res
+    except Exception as e:
+        logger.debug(f"Khong the go reply keyboard: {e}")
+
+    if "Quét" in text:
+        await cmd_scan(update, context)
+    elif "Ví Giả Lập" in text:
+        await cmd_paper(update, context)
+    elif "Quản Lý Ví" in text:
+        await cmd_wallets(update, context)
+    elif "Bảo Mật" in text:
+        await cmd_security(update, context)
+    elif "Tin Tức" in text:
+        await cmd_news(update, context)
+    elif "Tín Hiệu Active" in text:
+        await cmd_signals(update, context)
+    elif "Cảnh Báo" in text:
+        await cmd_alerts(update, context)
+    elif "Hướng Dẫn" in text:
+        await cmd_help(update, context)
+    elif "Hỏi AI" in text:
+        await cmd_ask(update, context)
+    elif "Menu Chính" in text or "Menu" in text:
+        await cmd_start(update, context)
+
+
 #  MAIN - KHOI DONG BOT
 # ============================================
 
@@ -2915,7 +2971,23 @@ def main():
     app.add_handler(CommandHandler("chat", requires_whitelist(cmd_chat)))
     app.add_handler(CommandHandler("model", requires_whitelist(cmd_model)))
 
-    # Bat ky tin nhan text nao -> phan tich token
+    # Xu ly cac nut tren persistent keyboard cu (go ban phim cu va dieu huong)
+    menu_pattern = (
+        r"^(📊\s*)?Quét\s*(Coins|Top Coins)"
+        r"|(📈\s*)?Ví Giả Lập"
+        r"|(💼\s*)?Quản Lý Ví"
+        r"|(🛡️?\s*)?Bảo Mật"
+        r"|(📰\s*)?Tin Tức(\s*Crypto)?"
+        r"|(📡\s*)?Tín Hiệu Active"
+        r"|(🔔\s*)?Cảnh Báo(\s*Giá)?"
+        r"|(📖\s*)?Hướng Dẫn"
+        r"|(🤖\s*)?Menu Chính"
+        r"|(🤖\s*)?Hỏi AI"
+    )
+    menu_filter = filters.Regex(re.compile(menu_pattern, re.IGNORECASE))
+    app.add_handler(MessageHandler(menu_filter, requires_whitelist(handle_menu_text_button)))
+
+    # Bat ky tin nhan text nao hop le (token ticker) -> phan tich token
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, requires_whitelist(analyze_token)))
 
     # Khoi dong Signal Tracker

@@ -513,150 +513,150 @@ class SignalScanner:
                                 if coin_name not in ("BTC", "ETH"):
                                     logger.info(f"⏭️ [Scanner] Bỏ qua thông báo và giao dịch Futures cho {coin_name} (chỉ chấp nhận BTC/ETH)")
                                     continue
-                                    reasons = signal.get("reasons", [])
-                                    reasons_str = ", ".join(reasons) if reasons else "Chỉ báo kỹ thuật đảo chiều"
-                                    
-                                    entry = signal.get("entry", signal.get("price", 0))
-                                    sl = signal.get("sl", 0)
-                                    tp = signal.get("tp", 0)
-                                    
-                                    # Mặc định dùng static levels
-                                    smart_sl = sl
-                                    smart_tp1 = entry * (1.015 if direction == "LONG" else 0.985)
-                                    smart_tp2 = entry * (1.030 if direction == "LONG" else 0.970)
-                                    smart_tp3 = tp
-                                    
-                                    # Thử tính Smart Levels từ DataFrame
-                                    smart_levels = None
-                                    df = dfs_by_key.get(key)
-                                    if df is not None:
-                                        try:
-                                            from analytics.macro_calendar import MacroCalendar
-                                            macro = MacroCalendar()
-                                            risk_data = await macro.assess_risk()
-                                            macro_risk = risk_data.get("risk_level", "NORMAL")
-                                            await macro.close()
-                                            
-                                            smart_levels = self.analyzer.compute_smart_levels(
-                                                df=df,
-                                                direction=direction,
-                                                leverage=10,
-                                                macro_risk=macro_risk
-                                            )
-                                            if "error" not in smart_levels:
-                                                smart_sl = smart_levels["sl"]
-                                                smart_tp1 = smart_levels["tp1"]
-                                                smart_tp2 = smart_levels["tp2"]
-                                                smart_tp3 = smart_levels["tp3"]
-                                                logger.info(f"✨ [Smart Levels] Da tinh muc SL/TP cho {key}: SL={smart_sl}, TP1={smart_tp1}, TP2={smart_tp2}, TP3={smart_tp3}")
-                                        except Exception as ex:
-                                            logger.error(f"Loi tinh toan Smart Levels cho {key}: {ex}")
-
-                                    # Tính rating cơ sở
-                                    base_rating = self.calculate_signal_rating(signal, tf, macro_trend)
-                                    
-                                    # === AI INTELLIGENCE ADJUSTMENTS ===
-                                    rating, ai_details = self._apply_ai_adjustments(
-                                        base_rating, signal, df, tf, macro_trend, symbol=symbol
-                                    )
-                                    signal["rating"] = rating
-                                    signal["ai_details"] = ai_details
-                                    
-                                    # Log AI adjustment nếu có thay đổi
-                                    if ai_details.get("total_adjust", 0) != 0:
-                                        logger.info(
-                                            f"🧠 [AI] {key}: Base={base_rating}⭐ → Final={rating}⭐ "
-                                            f"(adjust={ai_details['total_adjust']:+d}) | "
-                                            f"Regime={ai_details.get('regime', {}).get('regime', '?')} "
-                                            f"Whale={ai_details.get('whale', {}).get('bias', '?')} "
-                                            f"News={ai_details.get('news', {}).get('bias', '?')} "
-                                            f"ML={ai_details.get('ml', {}).get('confidence', '?')}"
-                                        )
-
-                                    # Check news: should_pause_auto_trade?
-                                    news_pause = ai_details.get("news", {}).get("should_pause", False)
-                                    
-                                    # Tự động vào lệnh nếu Auto Trade bật và tín hiệu >= 4 sao
-                                    if self.trade_engine and self.trade_engine.auto_trade_enabled and self.signal_tracker:
-                                        if news_pause:
-                                            logger.warning(f"⚠️ [AI] Auto-trade tạm dừng do sự kiện macro quan trọng")
-                                        elif rating >= 4:
-                                            signal_key = f"{coin_name}_{tf}"
-                                            if signal_key not in self.trade_engine.positions:
-                                                logger.info(f"🤖 [Auto Trade] Tự động mở vị thế cho {signal_key} (Rating: {rating} sao, AI-adjusted)")
-                                                # Đòn bẩy thích ứng từ Smart SL/TP (cực đại là 10x)
-                                                rec_lev = smart_levels.get("recommended_leverage", 10) if (smart_levels and "error" not in smart_levels) else 10
-                                                trade_leverage = min(rec_lev, 10)
-                                                trade_leverage = max(trade_leverage, 1)
-                                                
-                                                # AI adjustments cho leverage và SL
-                                                regime_adj = ai_details.get("regime", {}).get("regime", "")
-                                                news_adj = self._ai_cache.get("news", {})
-                                                if regime_adj == "VOLATILE":
-                                                    trade_leverage = max(1, trade_leverage // 2)
-                                                if news_adj.get("leverage_mult", 1.0) < 1.0:
-                                                    trade_leverage = max(1, int(trade_leverage * news_adj["leverage_mult"]))
-                                                
-                                                self.signal_tracker.add_signal({
-                                                    "key": signal_key,
-                                                    "coin": coin_name,
-                                                    "type": "FUTURES",
-                                                    "direction": direction,
-                                                    "entry": entry,
-                                                    "sl": smart_sl,
-                                                    "tp1": round(smart_tp1, 2),
-                                                    "tp2": round(smart_tp2, 2),
-                                                    "tp3": round(smart_tp3, 2),
-                                                    "chat_id": self.tg_notifier.chat_id,
-                                                    "leverage": trade_leverage,
-                                                    "rating": rating,
-                                                    "tf": tf,
-                                                    "atr": smart_levels.get("atr", 0) if (smart_levels and "error" not in smart_levels) else 0,
-                                                    "ai_details": ai_details,
-                                                })
-                                        else:
-                                            logger.info(f"⏭️ [Auto Trade] Bỏ qua {coin_name}_{tf} vì rating={rating} < 4 sao")
-                                    
-# M7 fix: CRITICAL event khong con tru rating nua (chi pause auto-trade)
-                                    # → canh bao AI/su kien phai di kem tin nhan de trader manual biet rui ro.
-                                    ai_notes = ""
-                                    warn_parts = list(ai_details.get("news", {}).get("warnings", []))
-                                    warn_parts += list(ai_details.get("whale", {}).get("warnings", []))
-                                    if news_pause:
-                                        warn_parts.append("⛔ Auto-trade tam dung (su kien macro CRITICAL)")
-                                    if warn_parts:
-                                        ai_notes = " | ⚠️ " + " | ".join(str(w) for w in warn_parts[:2])
-
-                                    # Gửi thông báo khi có đảo chiều hoặc tín hiệu khởi đầu mạnh (>= 4 sao)
-                                    should_notify = (not is_first_scan) or (is_first_scan and rating >= 4)
-                                    if should_notify:
-                                        # 1. Gửi Telegram Notifier
-                                        logger.info(f"📨 Đang gửi tín hiệu Telegram cho {key}...")
-                                        await self.tg_notifier.send_signal(
-                                            coin=f"{coin_name} ({tf})",
-                                            direction=direction,
-                                            entry=entry,
-                                            sl=smart_sl,
-                                            tp=smart_tp3,
-                                            reason=html.escape(reasons_str + ai_notes),
-                                            rating=rating
-                                        )
+                                reasons = signal.get("reasons", [])
+                                reasons_str = ", ".join(reasons) if reasons else "Chỉ báo kỹ thuật đảo chiều"
+                                
+                                entry = signal.get("entry", signal.get("price", 0))
+                                sl = signal.get("sl", 0)
+                                tp = signal.get("tp", 0)
+                                
+                                # Mặc định dùng static levels
+                                smart_sl = sl
+                                smart_tp1 = entry * (1.015 if direction == "LONG" else 0.985)
+                                smart_tp2 = entry * (1.030 if direction == "LONG" else 0.970)
+                                smart_tp3 = tp
+                                
+                                # Thử tính Smart Levels từ DataFrame
+                                smart_levels = None
+                                df = dfs_by_key.get(key)
+                                if df is not None:
+                                    try:
+                                        from analytics.macro_calendar import MacroCalendar
+                                        macro = MacroCalendar()
+                                        risk_data = await macro.assess_risk()
+                                        macro_risk = risk_data.get("risk_level", "NORMAL")
+                                        await macro.close()
                                         
-                                        # 2. Gửi Zalo Notifier (nếu có cấu hình)
-                                        zalo_text = (
-                                            f"🚨 PHÁT HIỆN TÍN HIỆU ({tf.upper()})\n"
-                                            f"━━━━━━━━━━━━━━━━━━\n"
-                                            f"🪙 Coin: {coin_name}\n"
-                                            f"👉 Hướng: {direction}\n"
-                                            f"⭐ Độ tin cậy: {'⭐' * rating}\n"
-                                            f"📍 Entry: ${entry:,.4f}\n"
-                                            f"🛑 Stop Loss: ${smart_sl:,.4f}\n"
-                                            f"🎯 Take Profit: ${smart_tp3:,.4f}\n"
-                                            f"💡 Lý do: {reasons_str}{ai_notes}\n"
-                                            f"━━━━━━━━━━━━━━━━━━"
+                                        smart_levels = self.analyzer.compute_smart_levels(
+                                            df=df,
+                                            direction=direction,
+                                            leverage=10,
+                                            macro_risk=macro_risk
                                         )
-                                        await self.zalo_notifier.send_message(zalo_text)
+                                        if "error" not in smart_levels:
+                                            smart_sl = smart_levels["sl"]
+                                            smart_tp1 = smart_levels["tp1"]
+                                            smart_tp2 = smart_levels["tp2"]
+                                            smart_tp3 = smart_levels["tp3"]
+                                            logger.info(f"✨ [Smart Levels] Da tinh muc SL/TP cho {key}: SL={smart_sl}, TP1={smart_tp1}, TP2={smart_tp2}, TP3={smart_tp3}")
+                                    except Exception as ex:
+                                        logger.error(f"Loi tinh toan Smart Levels cho {key}: {ex}")
+
+                                # Tính rating cơ sở
+                                base_rating = self.calculate_signal_rating(signal, tf, macro_trend)
+                                
+                                # === AI INTELLIGENCE ADJUSTMENTS ===
+                                rating, ai_details = self._apply_ai_adjustments(
+                                    base_rating, signal, df, tf, macro_trend, symbol=symbol
+                                )
+                                signal["rating"] = rating
+                                signal["ai_details"] = ai_details
+                                
+                                # Log AI adjustment nếu có thay đổi
+                                if ai_details.get("total_adjust", 0) != 0:
+                                    logger.info(
+                                        f"🧠 [AI] {key}: Base={base_rating}⭐ → Final={rating}⭐ "
+                                        f"(adjust={ai_details['total_adjust']:+d}) | "
+                                        f"Regime={ai_details.get('regime', {}).get('regime', '?')} "
+                                        f"Whale={ai_details.get('whale', {}).get('bias', '?')} "
+                                        f"News={ai_details.get('news', {}).get('bias', '?')} "
+                                        f"ML={ai_details.get('ml', {}).get('confidence', '?')}"
+                                    )
+
+                                # Check news: should_pause_auto_trade?
+                                news_pause = ai_details.get("news", {}).get("should_pause", False)
+                                
+                                # Tự động vào lệnh nếu Auto Trade bật và tín hiệu >= 4 sao
+                                if self.trade_engine and self.trade_engine.auto_trade_enabled and self.signal_tracker:
+                                    if news_pause:
+                                        logger.warning(f"⚠️ [AI] Auto-trade tạm dừng do sự kiện macro quan trọng")
+                                    elif rating >= 4:
+                                        signal_key = f"{coin_name}_{tf}"
+                                        if signal_key not in self.trade_engine.positions:
+                                            logger.info(f"🤖 [Auto Trade] Tự động mở vị thế cho {signal_key} (Rating: {rating} sao, AI-adjusted)")
+                                            # Đòn bẩy thích ứng từ Smart SL/TP (cực đại là 10x)
+                                            rec_lev = smart_levels.get("recommended_leverage", 10) if (smart_levels and "error" not in smart_levels) else 10
+                                            trade_leverage = min(rec_lev, 10)
+                                            trade_leverage = max(trade_leverage, 1)
+                                            
+                                            # AI adjustments cho leverage và SL
+                                            regime_adj = ai_details.get("regime", {}).get("regime", "")
+                                            news_adj = self._ai_cache.get("news", {})
+                                            if regime_adj == "VOLATILE":
+                                                trade_leverage = max(1, trade_leverage // 2)
+                                            if news_adj.get("leverage_mult", 1.0) < 1.0:
+                                                trade_leverage = max(1, int(trade_leverage * news_adj["leverage_mult"]))
+                                            
+                                            self.signal_tracker.add_signal({
+                                                "key": signal_key,
+                                                "coin": coin_name,
+                                                "type": "FUTURES",
+                                                "direction": direction,
+                                                "entry": entry,
+                                                "sl": smart_sl,
+                                                "tp1": round(smart_tp1, 2),
+                                                "tp2": round(smart_tp2, 2),
+                                                "tp3": round(smart_tp3, 2),
+                                                "chat_id": self.tg_notifier.chat_id,
+                                                "leverage": trade_leverage,
+                                                "rating": rating,
+                                                "tf": tf,
+                                                "atr": smart_levels.get("atr", 0) if (smart_levels and "error" not in smart_levels) else 0,
+                                                "ai_details": ai_details,
+                                            })
+                                    else:
+                                        logger.info(f"⏭️ [Auto Trade] Bỏ qua {coin_name}_{tf} vì rating={rating} < 4 sao")
+                                
+# M7 fix: CRITICAL event khong con tru rating nua (chi pause auto-trade)
+                                # → canh bao AI/su kien phai di kem tin nhan de trader manual biet rui ro.
+                                ai_notes = ""
+                                warn_parts = list(ai_details.get("news", {}).get("warnings", []))
+                                warn_parts += list(ai_details.get("whale", {}).get("warnings", []))
+                                if news_pause:
+                                    warn_parts.append("⛔ Auto-trade tam dung (su kien macro CRITICAL)")
+                                if warn_parts:
+                                    ai_notes = " | ⚠️ " + " | ".join(str(w) for w in warn_parts[:2])
+
+                                # Gửi thông báo khi có đảo chiều hoặc tín hiệu khởi đầu mạnh (>= 4 sao)
+                                should_notify = (not is_first_scan) or (is_first_scan and rating >= 4)
+                                if should_notify:
+                                    # 1. Gửi Telegram Notifier
+                                    logger.info(f"📨 Đang gửi tín hiệu Telegram cho {key}...")
+                                    await self.tg_notifier.send_signal(
+                                        coin=f"{coin_name} ({tf})",
+                                        direction=direction,
+                                        entry=entry,
+                                        sl=smart_sl,
+                                        tp=smart_tp3,
+                                        reason=html.escape(reasons_str + ai_notes),
+                                        rating=rating
+                                    )
                                     
+                                    # 2. Gửi Zalo Notifier (nếu có cấu hình)
+                                    zalo_text = (
+                                        f"🚨 PHÁT HIỆN TÍN HIỆU ({tf.upper()})\n"
+                                        f"━━━━━━━━━━━━━━━━━━\n"
+                                        f"🪙 Coin: {coin_name}\n"
+                                        f"👉 Hướng: {direction}\n"
+                                        f"⭐ Độ tin cậy: {'⭐' * rating}\n"
+                                        f"📍 Entry: ${entry:,.4f}\n"
+                                        f"🛑 Stop Loss: ${smart_sl:,.4f}\n"
+                                        f"🎯 Take Profit: ${smart_tp3:,.4f}\n"
+                                        f"💡 Lý do: {reasons_str}{ai_notes}\n"
+                                        f"━━━━━━━━━━━━━━━━━━"
+                                    )
+                                    await self.zalo_notifier.send_message(zalo_text)
+                                
                         except Exception as inner_e:
                             logger.error(f"Lỗi xử lý kết quả {key}: {inner_e}")
                             

@@ -34,9 +34,23 @@ class PriceMonitor:
         self.alert_threshold = alert_threshold_pct
         self.update_interval = update_interval_min * 60  # Convert to seconds
         self.ws = BinanceWebSocket()
+        self.ws.on_price_update(self._on_price_update)
         self.notifier = TelegramNotifier()
         self.last_alert: dict[str, datetime] = {}
         self.alert_cooldown = 300  # 5 phut giua 2 lan canh bao cung coin
+
+    def sync_symbols(self, extra_symbols) -> int:
+        """
+        Dong bo danh sach symbol can stream theo cac vi the dang mo.
+        WS se reconnect tu dong neu co symbol moi.
+        Tra ve so symbol moi duoc them.
+        """
+        extra = [f"{str(s).lower()}usdt" for s in extra_symbols if s]
+        if not extra:
+            return 0
+        before = len(self.ws.symbols)
+        self.ws.add_symbols(extra)
+        return len(self.ws.symbols) - before
 
     async def _on_price_update(self, data: dict):
         """Callback xu ly moi khi co gia moi tu WebSocket."""
@@ -115,8 +129,7 @@ class PriceMonitor:
         """Khoi dong Price Monitor (chay 24/7)."""
         logger.info(f"Price Monitor khoi dong: {len(self.symbols)} coins, nguong canh bao: {self.alert_threshold}%")
 
-        # Dang ky callback canh bao gia
-        self.ws.on_price_update(self._on_price_update)
+        # Callback canh bao gia da duoc dang ky trong __init__ (idempotent)
 
         # Chay song song: WebSocket stream + Cap nhat dinh ky
         await asyncio.gather(
