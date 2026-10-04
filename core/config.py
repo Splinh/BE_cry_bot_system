@@ -43,6 +43,7 @@ class Config:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     BROADCAST_SCANNER_SIGNALS: bool = os.getenv("BROADCAST_SCANNER_SIGNALS", "false").lower() in ("true", "1", "yes")
     SCENARIO_AUTO_TRADE: bool = os.getenv("SCENARIO_AUTO_TRADE", "true").lower() in ("true", "1", "yes")
+    SCENARIO_TTL_HOURS: float = float(os.getenv("SCENARIO_TTL_HOURS", "24"))  # han hieu luc kich ban (gio)
 
     # --- Risk Management (hard caps tuyet doi, ap dung ca paper lan live) ---
     # Don vi: PCT la ty le tren balance; USD la gioi han tuyet doi. Cap nao chat hon thi thang.

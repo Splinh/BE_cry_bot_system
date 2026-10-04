@@ -5,7 +5,7 @@ Hệ thống theo dõi các mốc chiến lược thay vì spam tín hiệu máy
 import os
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from loguru import logger
 from typing import Dict, List, Optional
 
@@ -15,6 +15,10 @@ from notifiers.zalo_bot import ZaloNotifier
 
 DATA_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "scenarios.json")
 
+# Số ngày giữ lại lịch sử kịch bản đã đóng (EXPIRED/REPLACED/CANCELLED/EXECUTED...) trong file JSON
+HISTORY_KEEP_DAYS = 7
+
+
 class ScenarioManager:
     def __init__(self, trade_engine=None, signal_tracker=None):
         self.trade_engine = trade_engine
@@ -23,68 +27,146 @@ class ScenarioManager:
         self.za = ZaloNotifier()
         self.last_early_alerts = {}
         self.scenarios: Dict[str, dict] = {}
+        self._file_mtime: float = 0.0
         self.load_scenarios()
 
+    # ------------------------------------------------------------------
+    # Lưu trữ & đồng bộ file
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _get_file_mtime() -> float:
+        try:
+            return os.path.getmtime(DATA_FILE)
+        except OSError:
+            return 0.0
+
     def load_scenarios(self):
-        """Đọc danh sách kịch bản từ file JSON. Nếu chưa có, tạo kịch bản mặc định."""
+        """Đọc danh sách kịch bản từ file JSON. Chưa có file -> danh sách rỗng (dùng /scenario gen để tạo)."""
         if os.path.exists(DATA_FILE):
             try:
                 with open(DATA_FILE, "r", encoding="utf-8") as f:
-                    self.scenarios = json.load(f)
-                    return
+                    data = json.load(f)
+                self.scenarios = data if isinstance(data, dict) else {}
+                self._file_mtime = self._get_file_mtime()
+                return
             except Exception as e:
                 logger.error(f"Lỗi đọc scenarios.json: {e}")
+        self.scenarios = {}
 
-        # Khởi tạo kịch bản mặc định BTC hôm nay
-        self.scenarios = {
-            "BTC_SHORT_OCT03": {
-                "id": "BTC_SHORT_OCT03",
-                "coin": "BTC",
-                "direction": "SHORT",
-                "trigger_price": 85300.0,
-                "early_warning_price": 84800.0,
-                "sl": 86250.0,
-                "tp1": 84000.0,
-                "tp2": 83000.0,
-                "tp3": 82000.0,
-                "leverage": 10,
-                "auto_trade": True,
-                "status": "ACTIVE",
-                "description": "Canh Short vùng cản S-R Flip 85,300$ - 85,600$ sau nhịp hồi kỹ thuật.",
-                "created_at": datetime.now().isoformat()
-            },
-            "BTC_LONG_OCT03": {
-                "id": "BTC_LONG_OCT03",
-                "coin": "BTC",
-                "direction": "LONG",
-                "trigger_price": 84100.0,
-                "early_warning_price": 84450.0,
-                "sl": 83300.0,
-                "tp1": 85000.0,
-                "tp2": 85500.0,
-                "tp3": 86000.0,
-                "leverage": 10,
-                "auto_trade": True,
-                "status": "ACTIVE",
-                "description": "Canh Scalp Long vùng hỗ trợ 83,800$ - 84,100$ khi giá quét đáy rút chân.",
-                "created_at": datetime.now().isoformat()
-            }
-        }
-        self.save_scenarios()
+    def _reload_if_changed(self):
+        """
+        Đọc lại file nếu có instance khác vừa ghi (vd: lệnh /scenario gen chạy song song với watcher).
+        Tránh việc watcher giữ bản cũ trong RAM rồi ghi đè mất kịch bản mới.
+        """
+        mtime = self._get_file_mtime()
+        if not mtime or mtime == self._file_mtime:
+            return
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self.scenarios = data
+                self._file_mtime = mtime
+        except Exception as e:
+            # File có thể đang được ghi dở -> lần kiểm tra sau sẽ đọc lại
+            logger.debug(f"Chưa đọc lại được scenarios.json: {e}")
 
     def save_scenarios(self):
-        """Lưu danh sách kịch bản ra file JSON."""
+        """Lưu danh sách kịch bản ra file JSON (ghi atomic qua file tạm để không bao giờ bị đọc dở)."""
         try:
             os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-            with open(DATA_FILE, "w", encoding="utf-8") as f:
+            tmp_path = f"{DATA_FILE}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self.scenarios, f, indent=4, ensure_ascii=False)
+            os.replace(tmp_path, DATA_FILE)
+            self._file_mtime = self._get_file_mtime()
         except Exception as e:
             logger.error(f"Lỗi lưu scenarios.json: {e}")
 
+    # ------------------------------------------------------------------
+    # Vòng đời kịch bản: hết hạn / thay thế / hủy
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_iso_ts(value) -> float:
+        if not value:
+            return 0.0
+        try:
+            return datetime.fromisoformat(str(value)).timestamp()
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _get_expiry_ts(self, sc: dict) -> float:
+        """Thời điểm hết hạn: ưu tiên expires_at, nếu không có thì created_at + SCENARIO_TTL_HOURS."""
+        exp = self._parse_iso_ts(sc.get("expires_at"))
+        if exp:
+            return exp
+        created = self._parse_iso_ts(sc.get("created_at"))
+        if created:
+            return created + Config.SCENARIO_TTL_HOURS * 3600
+        return 0.0
+
+    def _close(self, sc: dict, status: str, reason: str):
+        sc["status"] = status
+        sc["closed_at"] = datetime.now().isoformat()
+        sc["close_reason"] = reason
+
+    def _expire_stale(self) -> List[str]:
+        """Đóng các kịch bản ACTIVE đã quá hạn hiệu lực. Trả về danh sách ID vừa hết hạn."""
+        now_ts = time.time()
+        expired = []
+        for sc_id, sc in self.scenarios.items():
+            if sc.get("status") != "ACTIVE":
+                continue
+            exp = self._get_expiry_ts(sc)
+            if exp and now_ts >= exp:
+                self._close(sc, "EXPIRED", "Hết thời gian hiệu lực")
+                expired.append(sc_id)
+        if expired:
+            self.save_scenarios()
+            logger.info(f"⌛ Kịch bản hết hạn: {', '.join(expired)}")
+        return expired
+
+    def _prune_history(self):
+        """Xóa khỏi file các kịch bản đã đóng quá HISTORY_KEEP_DAYS ngày để file không phình to."""
+        cutoff = time.time() - HISTORY_KEEP_DAYS * 86400
+        self.scenarios = {
+            k: v for k, v in self.scenarios.items()
+            if v.get("status") == "ACTIVE"
+            or (self._parse_iso_ts(v.get("closed_at") or v.get("executed_at") or v.get("created_at")) or time.time()) >= cutoff
+        }
+
+    def cancel_scenario(self, scenario_id: str, reason: str = "Hủy thủ công") -> bool:
+        """Hủy 1 kịch bản ACTIVE theo ID (không phân biệt hoa thường)."""
+        self._reload_if_changed()
+        target = next((k for k in self.scenarios if k.upper() == scenario_id.upper()), None)
+        if not target or self.scenarios[target].get("status") != "ACTIVE":
+            return False
+        self._close(self.scenarios[target], "CANCELLED", reason)
+        self.save_scenarios()
+        return True
+
+    def cancel_all(self, coin: Optional[str] = None, reason: str = "Hủy thủ công") -> List[str]:
+        """Hủy toàn bộ kịch bản ACTIVE (hoặc chỉ của 1 coin). Trả về danh sách ID đã hủy."""
+        self._reload_if_changed()
+        cancelled = []
+        for sc_id, sc in self.scenarios.items():
+            if sc.get("status") != "ACTIVE":
+                continue
+            if coin and sc.get("coin", "").upper() != coin.upper():
+                continue
+            self._close(sc, "CANCELLED", reason)
+            cancelled.append(sc_id)
+        if cancelled:
+            self.save_scenarios()
+        return cancelled
+
     def get_active_scenarios(self) -> List[dict]:
+        self._reload_if_changed()
+        self._expire_stale()
         return [s for s in self.scenarios.values() if s.get("status") == "ACTIVE"]
 
     def set_auto_trade(self, scenario_id: str, enabled: bool) -> bool:
+        self._reload_if_changed()
         if scenario_id in self.scenarios:
             self.scenarios[scenario_id]["auto_trade"] = enabled
             self.save_scenarios()
@@ -92,6 +174,7 @@ class ScenarioManager:
         return False
 
     def toggle_global_auto_trade(self, enabled: bool):
+        self._reload_if_changed()
         for s in self.scenarios.values():
             s["auto_trade"] = enabled
         self.save_scenarios()
@@ -137,6 +220,17 @@ class ScenarioManager:
             return
 
         now = time.time()
+
+        # Đồng bộ với file (nhận kịch bản mới từ /scenario gen) và đóng kịch bản quá hạn
+        self._reload_if_changed()
+        expired_ids = self._expire_stale()
+        if expired_ids:
+            await self.broadcast(
+                "⌛ <b>Kịch bản hết hiệu lực</b>: " + ", ".join(expired_ids)
+                + "\n<i>Gõ /scenario gen để lên kịch bản mới theo giá hiện tại.</i>",
+                to_group=False,
+            )
+
         for sc_id, sc in list(self.scenarios.items()):
             if sc.get("status") != "ACTIVE":
                 continue
@@ -306,22 +400,25 @@ class ScenarioManager:
             step = float(sc.get("alert_step") or self.calculate_alert_step(coin, trigger, float(sc.get("early_warning_price", 0))))
             last_p = float(sc.get("last_alert_price", 0))
             last_alert_text = f" | Đã báo mốc: ${last_p:,.2f}" if last_p > 0 else ""
+            exp_ts = self._get_expiry_ts(sc)
+            exp_text = f"\n   • Hiệu lực đến: {datetime.fromtimestamp(exp_ts).strftime('%H:%M %d/%m')}" if exp_ts else ""
             lines.append(
                 f"{icon} <b>{sc['id']}</b> ({direction} {sc['coin']}) - {auto_icon}\n"
                 f"   • Vùng kích hoạt: <code>${trigger:,.2f}</code>{diff_text}\n"
                 f"   • Cảnh báo sớm: <code>${float(sc.get('early_warning_price', 0)):,.2f}</code> (bước {step:,.0f}${last_alert_text})\n"
-                f"   • SL: <code>${sc.get('sl'):,.2f}</code> | TP1: <code>${sc.get('tp1'):,.2f}</code>\n"
+                f"   • SL: <code>${sc.get('sl'):,.2f}</code> | TP1: <code>${sc.get('tp1'):,.2f}</code>{exp_text}\n"
                 f"   • Ghi chú: {sc.get('description', '')}\n"
             )
 
-        lines.append("⚡ <i>Gõ <code>/scenario gen</code> để hệ thống tự động phân tích và lên kịch bản mới cho BTC, ETH, Vàng.</i>")
-        lines.append("💡 <i>Gõ <code>/scenario auto on</code> hoặc <code>/scenario auto off</code> để bật/tắt tự động vào lệnh.</i>")
+        lines.append("⚡ <i>Gõ <code>/scenario gen</code> để phân tích lại và thay thế kịch bản cũ của BTC, ETH, Vàng.</i>")
+        lines.append("🗑 <i><code>/scenario del ID</code> hủy 1 kịch bản | <code>/scenario clear</code> hủy tất cả.</i>")
+        lines.append("💡 <i><code>/scenario auto on</code> / <code>/scenario auto off</code> bật/tắt tự động vào lệnh.</i>")
         return "\n".join(lines)
 
     async def auto_generate_scenarios(self, coins: List[str] = None, replace: bool = False) -> Dict[str, dict]:
         """
         Tự động phân tích kỹ thuật và sinh kịch bản chiến lược (BTC, ETH, PAXG Vàng).
-        Nếu replace=True: thay thế các kịch bản cũ của các coin đó.
+        Nếu replace=True: đóng (REPLACED) các kịch bản ACTIVE cũ của các coin đó - vẫn giữ lịch sử.
         Nếu replace=False: bổ sung/cập nhật.
         """
         from analytics.scenario_generator import ScenarioGenerator
@@ -332,14 +429,21 @@ class ScenarioManager:
             if not new_scenarios:
                 return {}
 
+            # Lấy trạng thái mới nhất trên đĩa trước khi sửa (watcher có thể vừa ghi)
+            self._reload_if_changed()
+
             if replace:
                 coins_to_replace = {c.upper() for c in target_coins}
-                self.scenarios = {
-                    k: v for k, v in self.scenarios.items()
-                    if v.get("coin", "").upper() not in coins_to_replace
-                }
+                for sc in self.scenarios.values():
+                    if sc.get("status") == "ACTIVE" and sc.get("coin", "").upper() in coins_to_replace:
+                        self._close(sc, "REPLACED", "Thay thế bởi kịch bản mới (/scenario gen)")
+
+            expires_at = (datetime.now() + timedelta(hours=Config.SCENARIO_TTL_HOURS)).isoformat()
+            for sc in new_scenarios.values():
+                sc.setdefault("expires_at", expires_at)
 
             self.scenarios.update(new_scenarios)
+            self._prune_history()
             self.save_scenarios()
             return new_scenarios
         finally:

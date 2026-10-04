@@ -2943,6 +2943,29 @@ async def cmd_scenario(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await wait_msg.edit_text(f"❌ Lỗi phân tích tạo kịch bản: {e}")
                 return
 
+        elif subcmd in ("del", "delete", "huy", "xoa") and len(args) > 1:
+            sc_id = args[1].strip()
+            if sm.cancel_scenario(sc_id):
+                await msg_target.reply_text(f"🗑 Đã hủy kịch bản <b>{html.escape(sc_id.upper())}</b>.", parse_mode="HTML")
+            else:
+                await msg_target.reply_text(
+                    f"❌ Không tìm thấy kịch bản đang chờ với ID <code>{html.escape(sc_id)}</code>.\nGõ /scenario để xem danh sách ID.",
+                    parse_mode="HTML",
+                )
+            return
+
+        elif subcmd in ("clear", "reset", "clearall"):
+            coin_filter = args[1].upper() if len(args) > 1 else None
+            cancelled = sm.cancel_all(coin=coin_filter)
+            if cancelled:
+                await msg_target.reply_text(
+                    f"🗑 Đã hủy {len(cancelled)} kịch bản: {', '.join(cancelled)}\n<i>Gõ /scenario gen để lên kịch bản mới.</i>",
+                    parse_mode="HTML",
+                )
+            else:
+                await msg_target.reply_text("ℹ️ Không có kịch bản nào đang chờ để hủy.")
+            return
+
         elif subcmd == "auto" and len(args) > 1:
             mode = args[1].lower()
             if mode in ("on", "bat", "1", "true"):
