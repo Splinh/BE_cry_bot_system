@@ -69,19 +69,27 @@ def requires_whitelist(func):
             return
             
         chat_id = update.effective_chat.id
+        user_id = update.effective_user.id if update.effective_user else chat_id
         
         # Cho phieu lenh /start va /register chay khong can whitelist
         if func.__name__ in ("cmd_start", "cmd_register"):
             return await func(update, context, *args, **kwargs)
             
         action = func.__name__.replace("cmd_", "")
-        access = security.check_access(chat_id, action)
+        
+        # Kiem tra quyen: uu tien user_id neu da whitelist (dung duoc ca trong group chat)
+        check_id = user_id if (user_id and security.is_whitelisted(user_id)) else chat_id
+        access = security.check_access(check_id, action)
         if not access["allowed"]:
-            if is_callback:
-                await update.callback_query.answer(text=f"🛡️ {access['reason']}", show_alert=True)
+            if user_id and security.is_whitelisted(user_id):
+                # Neu user da whitelist nhung chat_id la group -> van cho phep
+                pass
             else:
-                await update.message.reply_text(f"🛡️ {access['reason']}", parse_mode="HTML")
-            return
+                if is_callback:
+                    await update.callback_query.answer(text=f"🛡️ {access['reason']}", show_alert=True)
+                else:
+                    await update.message.reply_text(f"🛡️ {access['reason']}", parse_mode="HTML")
+                return
             
         return await func(update, context, *args, **kwargs)
     return wrapper
