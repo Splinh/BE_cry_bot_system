@@ -27,7 +27,9 @@ class TelegramNotifier:
             targets.append(chat_id)
         else:
             if self.chat_id:
-                targets.append(self.chat_id)
+                # Nếu to_group=False (chỉ trong bot riêng), bỏ qua nếu chat_id là Group (ID âm)
+                if to_group or not str(self.chat_id).strip().startswith("-"):
+                    targets.append(self.chat_id)
             if to_group and self.group_chat_id:
                 targets.append(self.group_chat_id)
 
