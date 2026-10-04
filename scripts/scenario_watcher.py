@@ -61,14 +61,6 @@ class ScenarioWatcherApp:
         prices = self.fetch_prices(["BTC", "ETH", "PAXG"])
         btc_price = prices.get("BTC", 0.0)
         logger.info(f"🚀 Scenario Watcher Daemon đã khởi động. Giá ban đầu: BTC=${btc_price:,.2f}, ETH=${prices.get('ETH', 0):,.2f}, PAXG=${prices.get('PAXG', 0):,.2f}")
-        
-        status_text = self.scenario_manager.format_status_message(btc_price)
-        init_msg = (
-            f"🤖 <b>[CryptoBot System]</b> Đã cập nhật chế độ AUTO-TRADE theo kịch bản!\n\n"
-            f"{status_text}\n"
-            f"<i>Bot sẽ tự động quét và khớp lệnh khi giá chạm điểm xác nhận xác suất cao.</i>"
-        )
-        await self.scenario_manager.broadcast(init_msg, to_group=False)
 
         check_counter = 0
         while self.running:

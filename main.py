@@ -3183,6 +3183,15 @@ def main():
         except Exception as e:
             logger.error(f"Khong the khoi dong Signal Scanner: {e}")
 
+        # Khoi dong Scenario Watcher Daemon (theo doi va auto-trade theo kich ban 24/7)
+        try:
+            from scripts.scenario_watcher import ScenarioWatcherApp
+            watcher_app = ScenarioWatcherApp()
+            asyncio.create_task(watcher_app.run())
+            logger.info("Scenario Watcher da khoi dong tu dong trong bot service.")
+        except Exception as e:
+            logger.error(f"Khong the khoi dong Scenario Watcher: {e}")
+
         # Khoi dong Telegram Bot task
         await app.initialize()
         await app.start()
