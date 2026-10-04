@@ -3070,6 +3070,20 @@ def main():
     # Dang ky CallbackQuery Handler
     app.add_handler(CallbackQueryHandler(handle_callback_query))
 
+    # Error handler toan cuc: khong de loi trong lenh bi nuot im lang
+    async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+        logger.opt(exception=context.error).error(f"Loi xu ly update: {context.error}")
+        try:
+            if isinstance(update, Update) and update.effective_message:
+                await update.effective_message.reply_text(
+                    f"❌ Lỗi xử lý lệnh: <code>{html.escape(str(context.error))[:300]}</code>",
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
+
+    app.add_error_handler(_on_error)
+
     # Dang ky lenh (Không cần check whitelist)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("register", cmd_register))
@@ -3210,8 +3224,11 @@ def main():
         # Khoi dong Scenario Watcher Daemon (theo doi va auto-trade theo kich ban 24/7)
         try:
             from scripts.scenario_watcher import ScenarioWatcherApp
-            watcher_app = ScenarioWatcherApp()
-            asyncio.create_task(watcher_app.run())
+            watcher_app = ScenarioWatcherApp(trade_engine=trade_engine, signal_tracker=signal_tracker)
+            watcher_task = asyncio.create_task(watcher_app.run())
+            watcher_task.add_done_callback(
+                lambda t: logger.error(f"Scenario Watcher da dung: {t.exception()}") if not t.cancelled() and t.exception() else None
+            )
             logger.info("Scenario Watcher da khoi dong tu dong trong bot service.")
         except Exception as e:
             logger.error(f"Khong the khoi dong Scenario Watcher: {e}")
