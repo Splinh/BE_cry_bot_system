@@ -2726,6 +2726,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # Quick-ask buttons (menu_ask_*) dung chung quyen "ask"
         if action.startswith("ask_"):
             action = "ask"
+        elif action.startswith("sc_"):
+            action = "scenario"
         access = security.check_access(chat_id, action)
         if not access["allowed"]:
             await query.answer(text=f"🛡️ {access['reason']}", show_alert=True)
@@ -2757,6 +2759,47 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await process_ask_question(update, context, "Xu hướng thị trường crypto tổng quan hôm nay thế nào?")
     elif data == "menu_ask_news":
         await process_ask_question(update, context, "Tin tức gì đang nóng ảnh hưởng đến thị trường crypto bây giờ?")
+    elif data == "sc_gen_all":
+        await query.answer("⏳ Đang phân tích kỹ thuật BTC, ETH, Vàng...")
+        from analytics.scenario_manager import ScenarioManager
+        sm = ScenarioManager(trade_engine=trade_engine, signal_tracker=signal_tracker)
+        try:
+            new_scenarios = await sm.auto_generate_scenarios(["BTC", "ETH", "PAXG"], replace=True)
+            lines = [
+                "🎯 <b>ĐÃ THIẾT LẬP KỊCH BẢN CHIẾN LƯỢC MỚI</b>",
+                f"⏰ <i>Thời gian: {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}</i>\n",
+            ]
+            for sc in new_scenarios.values():
+                icon = "🔴" if sc["direction"] == "SHORT" else "🟢"
+                lines.append(
+                    f"{icon} <b>{sc['id']}</b> ({sc['direction']} {sc['coin']})\n"
+                    f"   • Vùng kích hoạt: <code>${sc['trigger_price']:,.2f}</code>\n"
+                    f"   • Cảnh báo sớm: <code>${sc['early_warning_price']:,.2f}</code> (bước {sc.get('alert_step', 100):,.0f}$)\n"
+                    f"   • SL: <code>${sc['sl']:,.2f}</code> | TP1: <code>${sc['tp1']:,.2f}</code>\n"
+                    f"   • Kế hoạch: {sc['description']}\n"
+                )
+            lines.append("⚡ <i>Bot đang tự động phục kích theo các mốc trên!</i>")
+            await query.message.reply_text("\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Lỗi tạo kịch bản từ nút bấm: {e}")
+            await query.message.reply_text(f"❌ Lỗi phân tích tạo kịch bản: {e}")
+    elif data == "sc_auto_on":
+        await query.answer("Đã BẬT Auto-Trade!")
+        from analytics.scenario_manager import ScenarioManager
+        sm = ScenarioManager(trade_engine=trade_engine, signal_tracker=signal_tracker)
+        sm.toggle_global_auto_trade(True)
+        Config.SCENARIO_AUTO_TRADE = True
+        await query.message.reply_text("🟢 <b>Đã BẬT</b> chế độ Tự động vào lệnh (Auto-Trade) theo kịch bản!", parse_mode="HTML")
+    elif data == "sc_auto_off":
+        await query.answer("Đã TẮT Auto-Trade!")
+        from analytics.scenario_manager import ScenarioManager
+        sm = ScenarioManager(trade_engine=trade_engine, signal_tracker=signal_tracker)
+        sm.toggle_global_auto_trade(False)
+        Config.SCENARIO_AUTO_TRADE = False
+        await query.message.reply_text("🔴 <b>Đã TẮT</b> chế độ Tự động vào lệnh theo kịch bản!", parse_mode="HTML")
+    elif data == "sc_refresh":
+        await query.answer("Đang làm mới danh sách...")
+        await cmd_scenario(update, context)
     else:
         logger.warning(f"Unknown callback query data: {data}")
         await query.answer("Chức năng không tồn tại!")
@@ -2852,7 +2895,46 @@ async def cmd_scenario(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args if context and context.args else []
     if args:
         subcmd = args[0].lower()
-        if subcmd == "auto" and len(args) > 1:
+        if subcmd in ("gen", "generate", "tao", "phantich", "plan"):
+            wait_msg = await msg_target.reply_text(
+                "⏳ <b>Đang phân tích kỹ thuật đa khung thời gian cho BTC, ETH, VÀNG (PAXG)...</b>\n"
+                "<i>Hệ thống đang quét Swing High/Low, Pivot Points, Fibonacci & ATR để thiết lập kịch bản Short/Long...</i>",
+                parse_mode="HTML"
+            )
+            try:
+                new_scenarios = await sm.auto_generate_scenarios(["BTC", "ETH", "PAXG"], replace=True)
+                lines = [
+                    "🎯 <b>ĐÃ THIẾT LẬP KỊCH BẢN CHIẾN LƯỢC MỚI</b>",
+                    f"⏰ <i>Thời gian cập nhật: {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}</i>\n",
+                ]
+                for sc in new_scenarios.values():
+                    icon = "🔴" if sc["direction"] == "SHORT" else "🟢"
+                    lines.append(
+                        f"{icon} <b>{sc['id']}</b> ({sc['direction']} {sc['coin']})\n"
+                        f"   • Vùng kích hoạt: <code>${sc['trigger_price']:,.2f}</code>\n"
+                        f"   • Cảnh báo sớm: <code>${sc['early_warning_price']:,.2f}</code> (bước {sc.get('alert_step', 100):,.0f}$)\n"
+                        f"   • SL: <code>${sc['sl']:,.2f}</code> | TP1: <code>${sc['tp1']:,.2f}</code>\n"
+                        f"   • Kế hoạch: {sc['description']}\n"
+                    )
+                lines.append("⚡ <i>Bot đang tự động phục kích theo các mốc trên. Khi chạm cảnh báo sớm bot sẽ báo riêng, khi khớp cản sẽ tự động vào lệnh và báo group!</i>")
+                
+                keyboard = [
+                    [
+                        InlineKeyboardButton("🟢 Bật Auto-Trade", callback_data="sc_auto_on"),
+                        InlineKeyboardButton("🔴 Tắt Auto-Trade", callback_data="sc_auto_off"),
+                    ],
+                    [
+                        InlineKeyboardButton("📋 Xem Toàn Bộ Kịch Bản", callback_data="sc_refresh"),
+                    ]
+                ]
+                await wait_msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+                return
+            except Exception as e:
+                logger.error(f"Lỗi tạo kịch bản tự động: {e}")
+                await wait_msg.edit_text(f"❌ Lỗi phân tích tạo kịch bản: {e}")
+                return
+
+        elif subcmd == "auto" and len(args) > 1:
             mode = args[1].lower()
             if mode in ("on", "bat", "1", "true"):
                 sm.toggle_global_auto_trade(True)
@@ -2865,19 +2947,35 @@ async def cmd_scenario(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg_target.reply_text("🔴 <b>Đã TẮT</b> chế độ Tự động vào lệnh theo kịch bản! (Chỉ gửi thông báo cảnh báo)", parse_mode="HTML")
                 return
 
-    # Lấy giá BTC hiện tại
-    btc_price = 0.0
+    # Lấy giá đa coin (BTC, ETH, PAXG)
+    prices_map = {}
     try:
         from data_ingestion.binance_ws import BinanceWebSocket
         ws = BinanceWebSocket()
-        data = await ws.get_price_once("btcusdt")
-        if data:
-            btc_price = float(data.get("price", 0.0))
+        for coin in ["BTC", "ETH", "PAXG"]:
+            data = await ws.get_price_once(f"{coin.lower()}usdt")
+            if data and data.get("price"):
+                prices_map[coin] = float(data["price"])
     except Exception:
         pass
 
-    text = sm.format_status_message(btc_price)
-    await msg_target.reply_text(text, parse_mode="HTML")
+    btc_price = prices_map.get("BTC", 0.0)
+    text = sm.format_status_message(btc_price, prices=prices_map)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("⚡ Phân Tích & Lên Kịch Bản Mới", callback_data="sc_gen_all"),
+        ],
+        [
+            InlineKeyboardButton("🟢 Bật Auto-Trade", callback_data="sc_auto_on"),
+            InlineKeyboardButton("🔴 Tắt Auto-Trade", callback_data="sc_auto_off"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Làm Mới Danh Sách", callback_data="sc_refresh"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await msg_target.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def handle_menu_text_button(update: Update, context: ContextTypes.DEFAULT_TYPE):

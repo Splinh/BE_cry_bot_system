@@ -20,15 +20,15 @@ class TelegramNotifier:
         self.chat_id = Config.TELEGRAM_CHAT_ID
         self.group_chat_id = Config.TELEGRAM_GROUP_CHAT_ID
 
-    async def send_message(self, text: str, parse_mode: str = ParseMode.HTML, chat_id = None):
-        """Gửi tin nhắn về Telegram (hỗ trợ gửi nhiều đích nếu không chỉ định chat_id cụ thể)."""
+    async def send_message(self, text: str, parse_mode: str = ParseMode.HTML, chat_id = None, to_group: bool = True):
+        """Gửi tin nhắn về Telegram (hỗ trợ chỉ gửi bot cá nhân hoặc gửi cả group)."""
         targets = []
         if chat_id:
             targets.append(chat_id)
         else:
             if self.chat_id:
                 targets.append(self.chat_id)
-            if self.group_chat_id:
+            if to_group and self.group_chat_id:
                 targets.append(self.group_chat_id)
 
         if not targets:
@@ -90,10 +90,10 @@ class TelegramNotifier:
             msg += f"💡 <b>Lý do:</b> {reason}\n"
         msg += f"━━━━━━━━━━━━━━━━━━"
 
-        await self.send_message(msg)
+        await self.send_message(msg, to_group=True)
 
     async def send_price_alert(self, coin: str, price: float, change_pct: float):
-        """Gửi cảnh báo biến động giá mạnh."""
+        """Gửi cảnh báo biến động giá mạnh (chỉ gửi trong Bot cá nhân, không spam group)."""
         emoji = "📈" if change_pct > 0 else "📉"
         color = "🟢" if change_pct > 0 else "🔴"
 
@@ -101,10 +101,10 @@ class TelegramNotifier:
             f"{emoji} <b>CẢNH BÁO GIÁ</b>\n"
             f"{color} <b>{coin}:</b> ${price:,.2f} ({change_pct:+.2f}%)\n"
         )
-        await self.send_message(msg)
+        await self.send_message(msg, to_group=False)
 
     async def send_news_alert(self, title: str, source: str, sentiment: str, url: str = ""):
-        """Gửi cảnh báo tin tức nóng."""
+        """Gửi cảnh báo tin tức nóng (chỉ gửi trong Bot)."""
         sentiment_map = {
             "bullish": "🟢 TÍCH CỰC",
             "bearish": "🔴 TIÊU CỰC",
@@ -123,10 +123,10 @@ class TelegramNotifier:
             msg += f"🔗 <a href='{url}'>Đọc thêm</a>\n"
         msg += "━━━━━━━━━━━━━━━━━━"
 
-        await self.send_message(msg)
+        await self.send_message(msg, to_group=False)
 
     async def send_airdrop_report(self, project: str, wallets_done: int, total_wallets: int, tasks_completed: list):
-        """Gửi báo cáo tiến trình Airdrop."""
+        """Gửi báo cáo tiến trình Airdrop (chỉ gửi trong Bot)."""
         task_list = "\n".join([f"  ✅ {t}" for t in tasks_completed])
         msg = (
             f"🪂 <b>BÁO CÁO AIRDROP</b>\n"
@@ -136,7 +136,7 @@ class TelegramNotifier:
             f"📋 Tasks:\n{task_list}\n"
             f"━━━━━━━━━━━━━━━━━━"
         )
-        await self.send_message(msg)
+        await self.send_message(msg, to_group=False)
 
 
 # --- Hàm tiện ích (dùng nhanh ở bất cứ đâu) ---

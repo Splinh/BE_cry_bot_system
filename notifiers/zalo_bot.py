@@ -22,11 +22,13 @@ class ZaloNotifier:
         self.access_token = Config.ZALO_ACCESS_TOKEN
         self.user_id = Config.ZALO_USER_ID
 
-    async def send_message(self, text: str, chat_id: str = None) -> bool:
+    async def send_message(self, text: str, chat_id: str = None, to_group: bool = True) -> bool:
         """
         Gửi tin nhắn dạng văn bản (text) qua Zalo Bot API.
         Nếu truyền chat_id cụ thể, sẽ gửi đến chat_id đó.
-        Nếu không truyền chat_id, sẽ gửi đến tất cả các chat_id được cấu hình (admin & group).
+        Nếu không truyền chat_id:
+          - to_group=True: gửi tới cả admin_chat_id và group_chat_id.
+          - to_group=False: chỉ gửi tới admin_chat_id (nội bộ bot).
         """
         if not self.token:
             logger.debug("ZaloNotifier chưa được cấu hình (thiếu ZALO_BOT_TOKEN).")
@@ -39,7 +41,7 @@ class ZaloNotifier:
         else:
             if self.admin_chat_id:
                 targets.append(self.admin_chat_id)
-            if self.group_chat_id:
+            if to_group and self.group_chat_id:
                 targets.append(self.group_chat_id)
 
         if not targets:

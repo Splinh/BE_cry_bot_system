@@ -37,46 +37,57 @@ class ScenarioWatcherApp:
         )
         self.running = True
 
-    def fetch_price(self) -> float:
-        urls = [
-            "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
-            "https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT"
-        ]
-        for url in urls:
-            try:
-                r = requests.get(url, timeout=3)
-                if r.status_code == 200:
-                    return float(r.json().get("price", 0.0))
-            except Exception:
-                continue
-        return 0.0
+    def fetch_prices(self, symbols: list) -> dict:
+        """Lấy giá nhiều coin cùng lúc qua Binance API."""
+        prices = {}
+        for coin in symbols:
+            coin_clean = coin.upper().replace("USDT", "")
+            symbol = f"{coin_clean}USDT"
+            urls = [
+                f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}",
+                f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}"
+            ]
+            for url in urls:
+                try:
+                    r = requests.get(url, timeout=3)
+                    if r.status_code == 200:
+                        prices[coin_clean] = float(r.json().get("price", 0.0))
+                        break
+                except Exception:
+                    continue
+        return prices
 
     async def run(self):
-        start_price = self.fetch_price()
-        logger.info(f"🚀 Scenario Watcher Daemon đã khởi động. Giá ban đầu: ${start_price:,.2f}")
+        prices = self.fetch_prices(["BTC", "ETH", "PAXG"])
+        btc_price = prices.get("BTC", 0.0)
+        logger.info(f"🚀 Scenario Watcher Daemon đã khởi động. Giá ban đầu: BTC=${btc_price:,.2f}, ETH=${prices.get('ETH', 0):,.2f}, PAXG=${prices.get('PAXG', 0):,.2f}")
         
-        status_text = self.scenario_manager.format_status_message(start_price)
+        status_text = self.scenario_manager.format_status_message(btc_price)
         init_msg = (
             f"🤖 <b>[CryptoBot System]</b> Đã cập nhật chế độ AUTO-TRADE theo kịch bản!\n\n"
             f"{status_text}\n"
             f"<i>Bot sẽ tự động quét và khớp lệnh khi giá chạm điểm xác nhận xác suất cao.</i>"
         )
-        await self.scenario_manager.broadcast(init_msg)
+        await self.scenario_manager.broadcast(init_msg, to_group=False)
 
         check_counter = 0
         while self.running:
             try:
-                price = self.fetch_price()
-                if price <= 0:
-                    await asyncio.sleep(3)
-                    continue
+                # Lấy danh sách các coin đang có kịch bản ACTIVE
+                active_coins = list({s.get("coin", "BTC").upper() for s in self.scenario_manager.get_active_scenarios()})
+                if not active_coins:
+                    active_coins = ["BTC", "ETH", "PAXG"]
 
+                current_prices = self.fetch_prices(active_coins)
                 check_counter += 1
                 if check_counter % 20 == 0:
-                    logger.info(f"👀 Đang giám sát kịch bản... BTC = ${price:,.2f}")
+                    summary = ", ".join([f"{c}: ${p:,.2f}" for c, p in current_prices.items() if p > 0])
+                    logger.info(f"👀 Đang giám sát kịch bản... {summary}")
 
-                # Kiểm tra thị trường với ScenarioManager (Cảnh báo + Auto Trade)
-                await self.scenario_manager.check_price("BTC", price)
+                # Kiểm tra giá cho từng coin
+                for coin, p in current_prices.items():
+                    if p > 0:
+                        await self.scenario_manager.check_price(coin, p)
 
             except Exception as e:
                 logger.error(f"Lỗi vòng lặp Scenario Watcher: {e}")
