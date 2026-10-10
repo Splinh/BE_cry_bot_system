@@ -83,6 +83,14 @@ def inject_instances(trade_engine, tele_mgr, twit_mgr, system_status,
     ctx["price_monitor"] = price_monitor
     ctx["chat_engine"] = chat_engine
 
+    try:
+        from services.daily_report import get_report_service
+        _srv = get_report_service()
+        if not _srv.trade_engine and trade_engine:
+            _srv.trade_engine = trade_engine
+    except Exception:
+        pass
+
 # ============================================
 #  OVERVIEW
 # ============================================
@@ -352,9 +360,14 @@ def get_trading():
                 pnl = ((entry - current_price) / entry) * size * remaining_pct
                 pnl_pct = ((entry - current_price) / entry) * 100 if entry > 0 else 0
             
-            pos["pnl"] = round(pnl, 2)
+            realized_pnl = p.get("realized_pnl", 0.0)
+            pos["unrealized_pnl"] = round(pnl, 2)
+            pos["realized_pnl"] = round(realized_pnl, 2)
+            pos["pnl"] = round(pnl + realized_pnl, 2)
             pos["current_price"] = current_price
             pos["pnl_pct"] = round(pnl_pct, 2)
+            pos["remaining_pct"] = round(remaining_pct, 2)
+            pos["closed_pct"] = round(p.get("closed_pct", 0), 2)
             pos["change_24h"] = change_24h
             pos["liq_price"] = p.get("liq_price", 0.0)
             pos["fees_paid"] = p.get("fees_paid", 0.0)
@@ -412,7 +425,36 @@ def update_trading_config(req: TradingConfigReq):
 @api_router.get("/api/trading/history")
 def get_history():
     te = ctx["trade_engine"]
-    return {"history": te.history[-50:] if te else []}
+    records = []
+    seen_keys = set()
+
+    # 1. Tu trade_engine in-memory (bao gom ca cac phan chot loi TP1/TP2/TP3)
+    if te and te.history:
+        for h in reversed(te.history):
+            k = h.get("key") or f"{h.get('coin')}_{h.get('close_time')}"
+            if k not in seen_keys:
+                seen_keys.add(k)
+                records.append(dict(h))
+
+    # 2. Tu SQLite DB de khong bao gio bi mat sau khi khoi dong lai server
+    try:
+        from data.database import db
+        db_closed = db.get_closed_positions(limit=100)
+        for row in db_closed:
+            r_dict = dict(row)
+            k = r_dict.get("key") or f"{r_dict.get('coin')}_{r_dict.get('close_time')}"
+            if k not in seen_keys:
+                seen_keys.add(k)
+                records.append(r_dict)
+    except Exception as e:
+        logger.error(f"[History] Error fetching history from SQLite: {e}")
+
+    # Sap xep theo thoi gian dong lenh moi nhat len dau
+    records.sort(
+        key=lambda x: str(x.get("close_time") or x.get("_closed_at") or x.get("created_at") or ""),
+        reverse=True
+    )
+    return {"history": records[:100]}
 
 @api_router.post("/api/trading/toggle", dependencies=[Depends(require_permission("trading"))])
 def toggle_trade():
@@ -1060,11 +1102,70 @@ async def leverage_analyze(coin: str, leverage: int = 10, market_type: str = "fu
         except Exception as e:
             logger.warning(f"Limit entry computation failed: {e}")
             base_signal["limit_entries"] = []
+
+        # === SMC & LIQUIDITY SWEEPS ===
+        try:
+            from analytics.smc_analyzer import SMCAnalyzer
+            smc = SMCAnalyzer()
+            base_signal["smc"] = smc.analyze(df, current_price=price)
+        except Exception as e:
+            logger.warning(f"SMC analysis failed: {e}")
+            base_signal["smc"] = {"has_signal": False, "reasons": []}
         
         return base_signal
     finally:
         await ta_engine.close()
         await macro.close()
+
+@api_router.get("/api/trading/smc/{coin}")
+async def get_smc_analysis(coin: str, timeframe: str = "1h"):
+    """Phân tích Smart Money Concepts (SMC): Liquidity Sweeps, FVGs, Order Blocks."""
+    from analytics.technical import TechnicalAnalyzer
+    from analytics.smc_analyzer import SMCAnalyzer
+    ta = TechnicalAnalyzer()
+    try:
+        symbol = f"{coin.upper()}/USDT"
+        df = await ta.get_ohlcv(symbol, timeframe, limit=60)
+        if df.empty:
+            return {"error": f"Khong lay duoc du lieu cho {symbol}"}
+        smc = SMCAnalyzer()
+        res = smc.analyze(df)
+        res["symbol"] = symbol
+        res["timeframe"] = timeframe
+        return res
+    except Exception as e:
+        logger.error(f"SMC API error: {e}")
+        return {"error": str(e)}
+    finally:
+        await ta.close()
+
+@api_router.get("/api/trading/confluence/{coin}")
+async def get_mtf_confluence(coin: str):
+    """Phân tích Multi-Timeframe Confluence trên 3 khung: 4H, 1H, 15M."""
+    from analytics.technical import TechnicalAnalyzer
+    from analytics.mtf_confluence import MultiTimeframeConfluence
+    ta = TechnicalAnalyzer()
+    try:
+        symbol = f"{coin.upper()}/USDT"
+        import asyncio
+        df_15m, df_1h, df_4h = await asyncio.gather(
+            ta.get_ohlcv(symbol, "15m", limit=60),
+            ta.get_ohlcv(symbol, "1h", limit=60),
+            ta.get_ohlcv(symbol, "4h", limit=60),
+            return_exceptions=True
+        )
+        if any(isinstance(x, Exception) or x is None or x.empty for x in [df_15m, df_1h, df_4h]):
+            return {"error": f"Khong du du lieu da khung cho {symbol}"}
+
+        mtf = MultiTimeframeConfluence(ta_engine=ta)
+        res = mtf.evaluate_confluence(df_15m, df_1h, df_4h, symbol=symbol)
+        res["symbol"] = symbol
+        return res
+    except Exception as e:
+        logger.error(f"MTF Confluence API error: {e}")
+        return {"error": str(e)}
+    finally:
+        await ta.close()
 
 # ============================================
 #  SIGNALS
@@ -1436,6 +1537,7 @@ class BacktestReq(BaseModel):
     tp2_pct: float = 0.06
     tp3_pct: float = 0.10
     min_score: int = 3
+    strategy_mode: str = "indicators"
 
 @api_router.post("/api/backtest/run")
 async def run_backtest(req: BacktestReq):
@@ -1454,6 +1556,7 @@ async def run_backtest(req: BacktestReq):
             tp2_pct=req.tp2_pct,
             tp3_pct=req.tp3_pct,
             min_score=req.min_score,
+            strategy_mode=req.strategy_mode,
         )
         return result
     except Exception as e:
@@ -2063,6 +2166,8 @@ async def api_reports_latest():
     try:
         from services.daily_report import get_report_service
         service = get_report_service()
+        if not service.trade_engine and ctx.get("trade_engine"):
+            service.trade_engine = ctx["trade_engine"]
         report = service.get_latest_report()
         if report:
             return report
@@ -2070,7 +2175,43 @@ async def api_reports_latest():
         report = await service.build_report("daily")
         return report
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"[Report] api_reports_latest error: {e}")
+        from datetime import datetime, timedelta, timezone
+        VN_TZ = timezone(timedelta(hours=7))
+        now = datetime.now(VN_TZ)
+        te = ctx.get("trade_engine")
+        return {
+            "id": now.strftime("%Y%m%d_%H%M%S"),
+            "type": "daily",
+            "timestamp": now.isoformat(),
+            "date": now.strftime("%Y-%m-%d"),
+            "time": now.strftime("%H:%M"),
+            "trading": {
+                "balance": te.balance if te else 10000.0,
+                "open_positions": len(te.positions) if te else 0,
+                "open_positions_detail": [],
+                "today_closed": len(te.history) if te else 0,
+                "today_pnl": getattr(te, "daily_realized_pnl", 0.0) if te else 0.0,
+                "today_wins": 0,
+                "today_winrate": 0.0,
+                "total_closed": len(te.history) if te else 0,
+                "total_pnl": 0.0,
+                "total_winrate": 0.0,
+                "auto_trade_enabled": te.auto_trade_enabled if te else False,
+                "daily_pnl_engine": getattr(te, "daily_realized_pnl", 0.0) if te else 0.0,
+                "top_trades": [],
+                "worst_trades": [],
+            },
+            "market": {
+                "fear_greed": {"value": 50, "sentiment": "Neutral"},
+                "btc_price": 0.0,
+            },
+            "macro": {
+                "risk_level": "NORMAL",
+                "events_today": [],
+                "events_upcoming": [],
+            }
+        }
 
 
 @api_router.get("/api/reports/history")
@@ -2079,13 +2220,23 @@ async def api_reports_history(limit: int = 30, offset: int = 0):
     try:
         from services.daily_report import get_report_service
         service = get_report_service()
+        if not service.trade_engine and ctx.get("trade_engine"):
+            service.trade_engine = ctx["trade_engine"]
+        reports = service.get_report_history(limit=limit, offset=offset)
+        if not reports:
+            try:
+                await service.build_report("daily")
+                reports = service.get_report_history(limit=limit, offset=offset)
+            except Exception:
+                pass
         return {
-            "reports": service.get_report_history(limit=limit, offset=offset),
+            "reports": reports,
             "limit": limit,
             "offset": offset,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"[Report] api_reports_history error: {e}")
+        return {"reports": [], "limit": limit, "offset": offset}
 
 
 @api_router.get("/api/reports/{report_id}")
@@ -2110,6 +2261,8 @@ async def api_reports_generate():
     try:
         from services.daily_report import get_report_service
         service = get_report_service()
+        if not service.trade_engine and ctx.get("trade_engine"):
+            service.trade_engine = ctx["trade_engine"]
         report = await service.build_report("daily")
         return report
     except Exception as e:

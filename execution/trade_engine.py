@@ -87,6 +87,20 @@ class TradeEngine:
         else:
             self._save_data()
 
+        # Dong bo them lich su tu SQLite DB neu self.history chua co
+        if sqlite_db:
+            try:
+                db_hist = sqlite_db.get_closed_positions(limit=100)
+                existing_keys = {h.get("key") for h in self.history if h.get("key")}
+                for row in db_hist:
+                    r_dict = dict(row)
+                    k = r_dict.get("key")
+                    if k and k not in existing_keys:
+                        self.history.append(r_dict)
+                        existing_keys.add(k)
+            except Exception as e:
+                logger.debug(f"Sync history from SQLite error: {e}")
+
     def _save_data(self):
         """Luu trang thai xuong file JSON + SQLite."""
         os.makedirs(os.path.dirname(self.DATA_FILE), exist_ok=True)
@@ -114,6 +128,10 @@ class TradeEngine:
                 sqlite_db.update_balance(self.balance, self.auto_trade_enabled)
                 for key, pos in self.positions.items():
                     sqlite_db.save_position(key, pos)
+                for h in self.history[-50:]:
+                    k = h.get("key")
+                    if k:
+                        sqlite_db.save_position(k, h)
             except Exception as e:
                 logger.error(f"SQLite sync error: {e}")
 
@@ -221,15 +239,41 @@ class TradeEngine:
         self._roll_daily()
         return self.daily_realized_pnl <= -self.daily_loss_limit_usd()
 
-    def can_open_position(self, margin_required: float, leverage: int = 1) -> tuple:
+    @staticmethod
+    def calculate_safe_leverage(entry_price: float, stop_loss: float, buffer: float = 0.20) -> int:
+        """
+        Tính đòn bẩy tối đa an toàn để đảm bảo mức thanh lý luôn nằm sau Stop Loss một khoảng buffer (20%).
+        Triệt tiêu hoàn toàn rủi ro bị thanh lý trước khi chạm SL.
+        """
+        if entry_price <= 0 or stop_loss <= 0 or entry_price == stop_loss:
+            return 1
+        sl_pct = abs(entry_price - stop_loss) / entry_price
+        max_lev = int((1.0 - buffer) / sl_pct) if sl_pct > 0 else 1
+        return max(1, min(max_lev, Config.MAX_LEVERAGE))
+
+    def can_open_position(self, margin_required: float, leverage: int = 1,
+                          entry_price: float = 0.0, stop_loss: float = 0.0,
+                          direction: str = "LONG") -> tuple:
         """
         Kiem tra tat ca hard cap truoc khi mo lenh.
+        Bao gom kiem tra rui ro thanh ly (Liquidation Guard).
         Return (ok: bool, reason: str). reason rong neu ok.
         """
         self._roll_daily()
 
         if leverage < 1 or leverage > self.max_leverage:
             return False, f"Đòn bẩy {leverage}x vượt giới hạn an toàn (cho phép 1-{self.max_leverage}x)."
+
+        # Liquidation Guard: Đảm bảo mức thanh lý không kích hoạt trước hoặc bằng Stop Loss
+        if leverage > 1 and entry_price > 0 and stop_loss > 0:
+            dir_upper = direction.upper()
+            liq = entry_price * (1 - 1 / leverage + self.OKX_MMR) if dir_upper == "LONG" else entry_price * (1 + 1 / leverage - self.OKX_MMR)
+            if dir_upper == "LONG" and stop_loss <= liq:
+                safe_lev = self.calculate_safe_leverage(entry_price, stop_loss)
+                return False, f"RỦI RO THANH LÝ: Đòn bẩy x{leverage} làm giá thanh lý (${liq:,.2f}) kích hoạt trước Stop Loss (${stop_loss:,.2f}). Khuyên dùng đòn bẩy tối đa x{safe_lev}."
+            elif dir_upper == "SHORT" and stop_loss >= liq:
+                safe_lev = self.calculate_safe_leverage(entry_price, stop_loss)
+                return False, f"RỦI RO THANH LÝ: Đòn bẩy x{leverage} làm giá thanh lý (${liq:,.2f}) kích hoạt trước Stop Loss (${stop_loss:,.2f}). Khuyên dùng đòn bẩy tối đa x{safe_lev}."
 
         if self.is_trading_locked():
             return False, (f"Da cham gioi han lo/ngay "
@@ -581,8 +625,16 @@ class TradeEngine:
         if is_live:
             self.sync_binance_balance()
 
-        # Enforce Risk Guards
-        ok, reason = self.can_open_position(margin_required, leverage=leverage)
+        pred_sl = float(smart_levels.get("sl", 0.0)) if smart_levels and not smart_levels.get("error") else 0.0
+
+        # Enforce Risk Guards (bao gom Liquidation Guard)
+        ok, reason = self.can_open_position(
+            margin_required,
+            leverage=leverage,
+            entry_price=current_price,
+            stop_loss=pred_sl,
+            direction=direction
+        )
         if not ok:
             self.last_error = reason
             logger.warning(f"Manual trade blocked: {reason}")
@@ -1033,6 +1085,43 @@ class TradeEngine:
 
         pos["closed_pct"] += pct_to_close
         pos["pnl"] += pnl
+        pos["realized_pnl"] = pos.get("realized_pnl", 0.0) + pnl
+
+        # Ghi nhan PnL vao bo dem loi nhuan ngay
+        self._record_realized_pnl(pnl)
+
+        # Ghi nhan su kien chot loi tung phan vao history
+        import time as _t
+        tp_label = "TP1" if pos["closed_pct"] <= 0.35 else ("TP2" if pos["closed_pct"] <= 0.65 else "TP3")
+        tp_record = {
+            "key": f"{sig_key}_{tp_label}_{int(_t.time())}",
+            "parent_key": sig_key,
+            "coin": pos.get("coin", ""),
+            "name": pos.get("name", ""),
+            "direction": pos.get("direction", "LONG"),
+            "type": pos.get("type", "FUTURES"),
+            "chain": pos.get("chain", ""),
+            "entry_price": pos.get("entry_price", 0.0),
+            "close_price": close_price,
+            "usdt_size": round(closed_size, 2),
+            "leverage": leverage,
+            "pnl": round(pnl, 2),
+            "status": f"PARTIAL_{tp_label}",
+            "closed_pct": round(pct_to_close, 2),
+            "close_reason": f"Chốt lời {tp_label} ({int(pct_to_close * 100)}%)",
+            "wallet_id": pos.get("wallet_id"),
+            "wallet_label": pos.get("wallet_label", ""),
+            "open_time": pos.get("open_time"),
+            "close_time": datetime.now(VN_TZ).isoformat(),
+            "_closed_at": datetime.now(VN_TZ).isoformat(),
+            "live": is_live,
+        }
+        self.history.append(tp_record)
+        if sqlite_db:
+            try:
+                sqlite_db.save_position(tp_record["key"], tp_record)
+            except Exception as e:
+                logger.error(f"SQLite save tp_record error: {e}")
         
         logger.info(f"TRADE CHOT 1 PHAN ({pct_to_close*100}%): {sig_key} | Gia chot: {close_price} | PnL tang: ${pnl:.2f} | Fees tang: ${close_fee if not is_live else 0:.4f} | Live: {is_live}")
 
@@ -1093,6 +1182,9 @@ class TradeEngine:
         pos["pnl"] += pnl
         pos["_closed_at"] = datetime.now(VN_TZ).isoformat()
 
+        # Ghi nhan PnL dong lenh vao bo dem ngay
+        self._record_realized_pnl(pnl)
+
         logger.info(f"TRADE DONG LENH: {sig_key} | Ly do: {reason} | PnL phan cuoi: ${pnl:.2f} | Fees phan cuoi: ${close_fee if not is_live else 0:.4f} | Tong PnL: ${pos['pnl']:.2f} | Live: {is_live}")
 
         # === AI Intelligence: Post-trade Analysis & ML Training ===
@@ -1144,6 +1236,11 @@ class TradeEngine:
 
         # Dua vao history
         self.history.append(dict(pos))
+        if sqlite_db:
+            try:
+                sqlite_db.save_position(sig_key, pos)
+            except Exception as e:
+                logger.error(f"SQLite save closed position error: {e}")
         self._save_data()
         return pos
 

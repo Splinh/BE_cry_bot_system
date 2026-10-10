@@ -51,71 +51,128 @@ class DailyReportService:
     # ============================================
 
     def _collect_trading_data(self) -> dict:
-        """Thu thập dữ liệu trading từ DB + TradeEngine."""
-        stats = db.get_stats()
-        balance = db.get_balance()
-        open_positions = db.get_open_positions()
+        """Thu thập dữ liệu trading từ TradeEngine + SQLite DB."""
         today_str = datetime.now(VN_TZ).strftime("%Y-%m-%d")
 
-        # Lệnh đóng hôm nay
-        conn = db._get_conn()
-        closed_today = conn.execute(
-            "SELECT COUNT(*) as c, COALESCE(SUM(pnl), 0) as pnl, "
-            "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins "
-            "FROM positions WHERE status!='OPEN' AND close_time LIKE ?",
-            (f"{today_str}%",)
-        ).fetchone()
-
-        today_count = closed_today["c"] or 0
-        today_pnl = closed_today["pnl"] or 0.0
-        today_wins = closed_today["wins"] or 0
-        today_winrate = (today_wins / today_count * 100) if today_count > 0 else 0.0
-
-        # Top performers (best/worst trades hôm nay)
-        top_trades = conn.execute(
-            "SELECT coin, direction, pnl, entry_price, close_price "
-            "FROM positions WHERE status!='OPEN' AND close_time LIKE ? "
-            "ORDER BY pnl DESC LIMIT 3",
-            (f"{today_str}%",)
-        ).fetchall()
-
-        worst_trades = conn.execute(
-            "SELECT coin, direction, pnl, entry_price, close_price "
-            "FROM positions WHERE status!='OPEN' AND close_time LIKE ? "
-            "ORDER BY pnl ASC LIMIT 3",
-            (f"{today_str}%",)
-        ).fetchall()
-
-        # Daily PnL từ TradeEngine (nếu có)
-        daily_pnl_engine = 0.0
+        # Balance & Auto-Trade status
+        balance = 0.0
         auto_trade = False
-        if self.trade_engine:
-            daily_pnl_engine = getattr(self.trade_engine, 'daily_realized_pnl', 0.0)
-            auto_trade = getattr(self.trade_engine, 'auto_trade_enabled', False)
+        daily_pnl_engine = 0.0
 
-        return {
-            "balance": balance,
-            "open_positions": len(open_positions),
-            "open_positions_detail": [
+        if self.trade_engine:
+            balance = getattr(self.trade_engine, 'balance', 0.0)
+            auto_trade = getattr(self.trade_engine, 'auto_trade_enabled', False)
+            daily_pnl_engine = getattr(self.trade_engine, 'daily_realized_pnl', 0.0)
+
+        if balance <= 0:
+            balance = db.get_balance()
+
+        # Open positions từ trade_engine trước, fallback DB
+        open_positions = []
+        if self.trade_engine and self.trade_engine.positions:
+            for k, p in self.trade_engine.positions.items():
+                if p.get("status") != "CLOSED":
+                    open_positions.append({
+                        "coin": p.get("coin", "?"),
+                        "direction": p.get("direction", "?"),
+                        "entry": p.get("entry_price", 0),
+                        "pnl": p.get("pnl", 0),
+                        "closed_pct": p.get("closed_pct", 0),
+                    })
+        if not open_positions:
+            db_open = db.get_open_positions()
+            open_positions = [
                 {
                     "coin": p.get("coin", "?"),
                     "direction": p.get("direction", "?"),
                     "entry": p.get("entry_price", 0),
                     "pnl": p.get("pnl", 0),
+                    "closed_pct": p.get("closed_pct", 0),
                 }
-                for p in open_positions[:10]
-            ],
+                for p in db_open[:10]
+            ]
+
+        # Tong hop tat ca lenh da dong / chot loi tu ca TradeEngine.history va SQLite DB
+        all_closed = []
+        seen_keys = set()
+
+        if self.trade_engine and self.trade_engine.history:
+            for h in self.trade_engine.history:
+                k = h.get("key") or f"{h.get('coin')}_{h.get('close_time')}"
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    all_closed.append(dict(h))
+
+        conn = db._get_conn()
+        try:
+            db_rows = conn.execute("SELECT * FROM positions WHERE status!='OPEN'").fetchall()
+            for r in db_rows:
+                k = r["key"] or f"{r['coin']}_{r['close_time']}"
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    all_closed.append(dict(r))
+        except Exception as e:
+            logger.error(f"[Report] Error fetching closed positions: {e}")
+
+        # Loc cac lenh da dong / chot loi trong ngay hom nay (theo gio VN)
+        today_trades = []
+        for t in all_closed:
+            close_time = t.get("close_time") or t.get("_closed_at") or ""
+            if close_time.startswith(today_str):
+                today_trades.append(t)
+
+        today_count = len(today_trades)
+        today_pnl = sum([float(t.get("pnl", 0) or 0) for t in today_trades])
+        today_wins = len([t for t in today_trades if float(t.get("pnl", 0) or 0) > 0])
+        today_winrate = (today_wins / today_count * 100) if today_count > 0 else 0.0
+
+        # Fallback daily PnL tu trade_engine neu co
+        if today_pnl == 0.0 and daily_pnl_engine != 0.0:
+            today_pnl = daily_pnl_engine
+
+        # Top performers hom nay (hoac lay tu lich su gan nhat neu hom nay it lenh)
+        trades_for_rank = today_trades if len(today_trades) >= 2 else all_closed
+        sorted_by_pnl = sorted(trades_for_rank, key=lambda x: float(x.get("pnl", 0) or 0), reverse=True)
+        top_trades = [t for t in sorted_by_pnl if float(t.get("pnl", 0) or 0) > 0][:3]
+        worst_trades = [t for t in reversed(sorted_by_pnl) if float(t.get("pnl", 0) or 0) < 0][:3]
+
+        # Tong luy ke
+        total_closed = len(all_closed)
+        total_pnl = sum([float(t.get("pnl", 0) or 0) for t in all_closed])
+        total_wins = len([t for t in all_closed if float(t.get("pnl", 0) or 0) > 0])
+        total_winrate = (total_wins / total_closed * 100) if total_closed > 0 else 0.0
+
+        return {
+            "balance": round(balance, 2),
+            "open_positions": len(open_positions),
+            "open_positions_detail": open_positions[:10],
             "today_closed": today_count,
             "today_pnl": round(today_pnl, 2),
             "today_wins": today_wins,
             "today_winrate": round(today_winrate, 1),
-            "total_closed": stats.get("closed_trades", 0),
-            "total_pnl": stats.get("total_pnl", 0),
-            "total_winrate": stats.get("win_rate", 0),
+            "total_closed": total_closed,
+            "total_pnl": round(total_pnl, 2),
+            "total_winrate": round(total_winrate, 1),
             "auto_trade_enabled": auto_trade,
             "daily_pnl_engine": round(daily_pnl_engine, 2),
-            "top_trades": [dict(t) for t in top_trades] if top_trades else [],
-            "worst_trades": [dict(t) for t in worst_trades] if worst_trades else [],
+            "top_trades": [
+                {
+                    "coin": t.get("coin", ""),
+                    "direction": t.get("direction", ""),
+                    "pnl": round(float(t.get("pnl", 0) or 0), 2),
+                    "reason": t.get("close_reason", ""),
+                }
+                for t in top_trades
+            ],
+            "worst_trades": [
+                {
+                    "coin": t.get("coin", ""),
+                    "direction": t.get("direction", ""),
+                    "pnl": round(float(t.get("pnl", 0) or 0), 2),
+                    "reason": t.get("close_reason", ""),
+                }
+                for t in worst_trades
+            ],
         }
 
     async def _collect_market_data(self) -> dict:
@@ -495,13 +552,25 @@ def get_report_service() -> DailyReportService:
     """Singleton accessor."""
     global _report_service
     if _report_service is None:
-        _report_service = DailyReportService()
+        mc = None
+        try:
+            from analytics.macro_calendar import MacroCalendar
+            mc = MacroCalendar()
+        except Exception:
+            pass
+        _report_service = DailyReportService(macro_calendar=mc)
     return _report_service
 
 
 def init_report_service(trade_engine=None, macro_calendar=None) -> DailyReportService:
     """Khởi tạo service với dependencies."""
     global _report_service
+    if macro_calendar is None:
+        try:
+            from analytics.macro_calendar import MacroCalendar
+            macro_calendar = MacroCalendar()
+        except Exception:
+            pass
     _report_service = DailyReportService(
         trade_engine=trade_engine,
         macro_calendar=macro_calendar,

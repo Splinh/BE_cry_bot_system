@@ -12,13 +12,15 @@ import pandas as pd
 import numpy as np
 
 from core.config import Config
+from analytics.smc_analyzer import SMCAnalyzer
+from analytics.divergence_detector import DivergenceDetector
 
 
 class BacktestEngine:
     """
     Chay backtest chien luoc TA tren du lieu lich su.
-    Su dung TechnicalAnalyzer de tinh chi bao va sinh tin hieu,
-    sau do gia lap giao dich voi SL/TP.
+    Su dung TechnicalAnalyzer, SMCAnalyzer va DivergenceDetector
+    de sinh tin hieu va gia lap giao dich voi SL/TP.
     """
 
     # Preset strategies
@@ -33,6 +35,7 @@ class BacktestEngine:
             "tp3_pct": 0.07,
             "min_score": 4,
             "leverage": 1,
+            "strategy_mode": "indicators",
         },
         "balanced": {
             "label": "Can Bang",
@@ -44,6 +47,7 @@ class BacktestEngine:
             "tp3_pct": 0.10,
             "min_score": 3,
             "leverage": 1,
+            "strategy_mode": "indicators",
         },
         "aggressive": {
             "label": "Manh Tay",
@@ -55,6 +59,7 @@ class BacktestEngine:
             "tp3_pct": 0.20,
             "min_score": 3,
             "leverage": 5,
+            "strategy_mode": "indicators",
         },
         "scalping": {
             "label": "Scalping",
@@ -66,11 +71,50 @@ class BacktestEngine:
             "tp3_pct": 0.04,
             "min_score": 2,
             "leverage": 25,
+            "strategy_mode": "indicators",
+        },
+        "smc_reversal": {
+            "label": "SMC Reversal (Bắt đỉnh/đáy)",
+            "description": "Bẫy quét râu Liquidity Sweep & FVG. R:R cao (1:3+), SL cực chặt.",
+            "risk_per_trade": 0.02,
+            "sl_pct": 0.012,
+            "tp1_pct": 0.035,
+            "tp2_pct": 0.07,
+            "tp3_pct": 0.12,
+            "min_score": 3,
+            "leverage": 3,
+            "strategy_mode": "smc",
+        },
+        "mean_reversion": {
+            "label": "Mean Reversion (Phân kỳ RSI)",
+            "description": "Săn đảo chiều tại biên Bollinger Bands & phân kỳ RSI khi Sideway.",
+            "risk_per_trade": 0.02,
+            "sl_pct": 0.015,
+            "tp1_pct": 0.025,
+            "tp2_pct": 0.05,
+            "tp3_pct": 0.08,
+            "min_score": 3,
+            "leverage": 2,
+            "strategy_mode": "divergence",
+        },
+        "hybrid_master": {
+            "label": "Hybrid Master (Đa tầng Confluence)",
+            "description": "Bộ lọc Trend EMA200 + SMC Sweep + Divergence + Dynamic Leverage.",
+            "risk_per_trade": 0.02,
+            "sl_pct": 0.018,
+            "tp1_pct": 0.036,
+            "tp2_pct": 0.072,
+            "tp3_pct": 0.12,
+            "min_score": 3,
+            "leverage": 3,
+            "strategy_mode": "hybrid",
         },
     }
 
     def __init__(self):
         self.initial_balance = 10000.0
+        self.smc = SMCAnalyzer()
+        self.divergence = DivergenceDetector()
 
     async def run(
         self,
@@ -84,6 +128,7 @@ class BacktestEngine:
         tp2_pct: float = 0.06,
         tp3_pct: float = 0.10,
         min_score: int = 3,
+        strategy_mode: str = "indicators",
     ) -> dict:
         """
         Chay backtest day du.
@@ -103,7 +148,7 @@ class BacktestEngine:
 
             logger.info(
                 f"[Backtest] {symbol} | TF: {timeframe} | "
-                f"Days: {days} | Candles: {limit} | Lev: x{leverage}"
+                f"Days: {days} | Candles: {limit} | Lev: x{leverage} | Mode: {strategy_mode}"
             )
 
             # 1. Lay du lieu
@@ -125,12 +170,14 @@ class BacktestEngine:
                 tp2_pct=tp2_pct,
                 tp3_pct=tp3_pct,
                 min_score=min_score,
+                strategy_mode=strategy_mode,
             )
 
             result["symbol"] = symbol
             result["timeframe"] = timeframe
             result["days"] = days
             result["leverage"] = leverage
+            result["strategy_mode"] = strategy_mode
             result["candles"] = len(df)
             result["period"] = {
                 "start": df.index[0].isoformat() if hasattr(df.index[0], 'isoformat') else str(df.index[0]),
@@ -167,6 +214,7 @@ class BacktestEngine:
         tp2_pct: float,
         tp3_pct: float,
         min_score: int,
+        strategy_mode: str = "indicators",
     ) -> dict:
         """
         Duyet qua tung nen, sinh signal va gia lap giao dich.
@@ -326,7 +374,7 @@ class BacktestEngine:
 
             # === SINH SIGNAL MOI (chi khi khong co position mo) ===
             if open_position is None and balance > 50:
-                signal = self._generate_signal_at(df, i, min_score)
+                signal = self._generate_signal_at(df, i, min_score, strategy_mode=strategy_mode)
 
                 if signal and signal["direction"] in ("LONG", "SHORT"):
                     signals_list.append({
@@ -339,22 +387,30 @@ class BacktestEngine:
 
                     direction = signal["direction"]
 
-                    # Tinh SL/TP
-                    if direction == "LONG":
-                        sl = price * (1 - sl_pct)
-                        tp1 = price * (1 + tp1_pct)
-                        tp2 = price * (1 + tp2_pct)
-                        tp3 = price * (1 + tp3_pct)
+                    # Tinh SL/TP (su dung custom SL/TP cua signal neu co)
+                    if signal.get("sl") and signal.get("tp1"):
+                        sl = signal["sl"]
+                        tp1 = signal["tp1"]
+                        tp2 = signal.get("tp2", price * (1 + tp2_pct) if direction == "LONG" else price * (1 - tp2_pct))
+                        tp3 = signal.get("tp3", price * (1 + tp3_pct) if direction == "LONG" else price * (1 - tp3_pct))
+                        actual_sl_pct = abs(price - sl) / price
                     else:
-                        sl = price * (1 + sl_pct)
-                        tp1 = price * (1 - tp1_pct)
-                        tp2 = price * (1 - tp2_pct)
-                        tp3 = price * (1 - tp3_pct)
+                        if direction == "LONG":
+                            sl = price * (1 - sl_pct)
+                            tp1 = price * (1 + tp1_pct)
+                            tp2 = price * (1 + tp2_pct)
+                            tp3 = price * (1 + tp3_pct)
+                        else:
+                            sl = price * (1 + sl_pct)
+                            tp1 = price * (1 - tp1_pct)
+                            tp2 = price * (1 - tp2_pct)
+                            tp3 = price * (1 - tp3_pct)
+                        actual_sl_pct = sl_pct
 
                     # Tinh position size (risk-based) — sync voi TradeEngine.calculate_position_size
                     risk_amount = balance * risk_per_trade
                     # San SL% toi thieu khi tinh size (tranh SL qua gan lam bung no size)
-                    sl_pct_for_size = max(sl_pct, Config.SL_PCT_FLOOR)
+                    sl_pct_for_size = max(actual_sl_pct, Config.SL_PCT_FLOOR)
                     pos_size = risk_amount / sl_pct_for_size
 
                     # Khong che margin/lenh: min(gioi han USD tuyet doi, % balance)
@@ -440,14 +496,88 @@ class BacktestEngine:
             "total_signals": len(signals_list),
         }
 
-    def _generate_signal_at(self, df: pd.DataFrame, idx: int, min_score: int) -> Optional[dict]:
+    def _generate_signal_at(self, df: pd.DataFrame, idx: int, min_score: int, strategy_mode: str = "indicators") -> Optional[dict]:
         """
-        Sinh signal tai vi tri idx trong DataFrame.
-        Tuong tu TechnicalAnalyzer.generate_signal() nhung cho phep tuy chinh min_score.
+        Sinh signal tai vi tri idx trong DataFrame theo strategy_mode:
+        - "indicators": He thong tinh diem chi bao truyen thong.
+        - "smc": Smart Money Concepts (Liquidity Sweep & FVG).
+        - "divergence": Phan ky RSI/MACD Mean Reversion.
+        - "hybrid": Ket hop Trend Filter + SMC + Divergence + Indicators.
         """
         row = df.iloc[idx]
         prev = df.iloc[idx - 1]
-        price = row["close"]
+        price = float(row["close"])
+
+        # 1. SMC Mode
+        if strategy_mode == "smc":
+            window = df.iloc[max(0, idx - 35):idx + 1]
+            sweeps = self.smc.detect_liquidity_sweeps(window, lookback=2)
+            if sweeps:
+                last_sweep = sweeps[-1]
+                direction = last_sweep["direction"]
+                sl = last_sweep["suggested_sl"]
+                sl_dist = abs(price - sl)
+                tp1 = price + sl_dist * 2.5 if direction == "LONG" else price - sl_dist * 2.5
+                tp2 = price + sl_dist * 4.0 if direction == "LONG" else price - sl_dist * 4.0
+                tp3 = price + sl_dist * 6.0 if direction == "LONG" else price - sl_dist * 6.0
+                return {
+                    "direction": direction,
+                    "score": 5,
+                    "bull": 5 if direction == "LONG" else 0,
+                    "bear": 5 if direction == "SHORT" else 0,
+                    "reasons": [last_sweep["reason"]],
+                    "sl": sl,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "tp3": tp3,
+                }
+            return None
+
+        # 2. Divergence Mode
+        if strategy_mode == "divergence":
+            window = df.iloc[max(0, idx - 35):idx + 1]
+            divs = self.divergence.detect_rsi_divergence(window, lookback=3)
+            if divs:
+                last_div = divs[-1]
+                direction = last_div["direction"]
+                sl_dist = price * 0.015
+                sl = price - sl_dist if direction == "LONG" else price + sl_dist
+                tp1 = price + price * 0.025 if direction == "LONG" else price - price * 0.025
+                tp2 = price + price * 0.05 if direction == "LONG" else price - price * 0.05
+                tp3 = price + price * 0.08 if direction == "LONG" else price - price * 0.08
+                return {
+                    "direction": direction,
+                    "score": 5,
+                    "bull": 5 if direction == "LONG" else 0,
+                    "bear": 5 if direction == "SHORT" else 0,
+                    "reasons": [last_div["reason"]],
+                    "sl": sl,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "tp3": tp3,
+                }
+            return None
+
+        # 3. Hybrid Mode: Kiem tra SMC truoc
+        if strategy_mode == "hybrid":
+            window = df.iloc[max(0, idx - 35):idx + 1]
+            sweeps = self.smc.detect_liquidity_sweeps(window, lookback=2)
+            if sweeps:
+                last_sweep = sweeps[-1]
+                direction = last_sweep["direction"]
+                sl = last_sweep["suggested_sl"]
+                sl_dist = abs(price - sl)
+                return {
+                    "direction": direction,
+                    "score": 6,
+                    "bull": 6 if direction == "LONG" else 0,
+                    "bear": 6 if direction == "SHORT" else 0,
+                    "reasons": [last_sweep["reason"], "Hybrid SMC Priority"],
+                    "sl": sl,
+                    "tp1": price + sl_dist * 2.5 if direction == "LONG" else price - sl_dist * 2.5,
+                    "tp2": price + sl_dist * 4.0 if direction == "LONG" else price - sl_dist * 4.0,
+                    "tp3": price + sl_dist * 6.0 if direction == "LONG" else price - sl_dist * 6.0,
+                }
 
         bull = 0
         bear = 0

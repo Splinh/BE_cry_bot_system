@@ -24,15 +24,23 @@ class TechnicalAnalyzer:
     """
 
     def __init__(self):
-        self.exchange = self._create_exchange()
+        self.exchange = None
+        try:
+            self.exchange = self._create_exchange()
+        except Exception:
+            self.exchange = None
 
     def _create_exchange(self, endpoint: str = "api.binance.com"):
-        connector = aiohttp.TCPConnector(resolver=ThreadedResolver())
-        session = aiohttp.ClientSession(connector=connector)
-        exchange = ccxt.binance({
-            "enableRateLimit": True,
-            "session": session
-        })
+        try:
+            connector = aiohttp.TCPConnector(resolver=ThreadedResolver())
+            session = aiohttp.ClientSession(connector=connector)
+            exchange = ccxt.binance({
+                "enableRateLimit": True,
+                "session": session
+            })
+        except Exception:
+            exchange = ccxt.binance({"enableRateLimit": True})
+
         if endpoint != "api.binance.com":
             for key, val in list(exchange.urls["api"].items()):
                 if isinstance(val, str) and "api.binance.com" in val:

@@ -52,9 +52,10 @@ def main():
         # Khoi dong Daily Report Service + Scheduler
         try:
             from services.daily_report import init_report_service, run_report_scheduler
+            from analytics.macro_calendar import MacroCalendar
             init_report_service(
                 trade_engine=trade_engine,
-                macro_calendar=getattr(signal_tracker, 'macro_calendar', None),
+                macro_calendar=MacroCalendar(),
             )
             asyncio.create_task(run_report_scheduler())
             logger.info("Daily Report Scheduler da khoi dong (08:00 & 23:59 UTC+7).")

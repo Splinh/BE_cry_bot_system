@@ -184,7 +184,7 @@ class MacroCalendar:
             connector = aiohttp.TCPConnector(resolver=ThreadedResolver())
             self.session = aiohttp.ClientSession(
                 connector=connector,
-                timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=4)
             )
         return self.session
 
@@ -238,7 +238,8 @@ class MacroCalendar:
         events = []
 
         try:
-            async with session.get(INVESTING_CALENDAR_URL) as resp:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            async with session.get(INVESTING_CALENDAR_URL, headers=headers, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     now = datetime.now(timezone.utc)
